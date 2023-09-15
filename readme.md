@@ -1,4 +1,4 @@
-a simple table compare tool
+a simple mysql table compare tool
 ### usage
 ```sh
 pip install mysql-compare
