@@ -1,0 +1,12 @@
+[project]
+name = "mysql-compare"
+version = "0.0.14"
+requires-python = ">=3.10"
+dependencies = ["mysql-connector-python"]
+
+[tool.setuptools]
+packages = ["mysql_compare"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

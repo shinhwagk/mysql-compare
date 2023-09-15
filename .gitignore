@@ -1,0 +1,10 @@
+__pycache__/
+dist/
+build/
+test/
+
+*.*.log
+*.*.done
+*.*.ckpt.json
+
+mysql_compare.egg-info

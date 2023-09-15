@@ -1,0 +1,1 @@
+from mysql_compare.mysql_compare import MysqlTableCompare
