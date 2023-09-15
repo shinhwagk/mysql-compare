@@ -8,6 +8,7 @@ python -m mysql_compare --source-dsn user/pass@host:ip --target-dsn user/pass@ho
 1. {db}.{table}.err.log
 2. {db}.{table}.done
 3. {db}.{table}.diff.log
+4. {db}.{table}.ckpt.log
 ```
 
 ```py
