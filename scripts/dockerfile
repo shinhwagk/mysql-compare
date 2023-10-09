@@ -1,0 +1,10 @@
+FROM python:3.11
+
+WORKDIR /app/
+COPY repair1.py dbrepair.py
+COPY dbcompare.py .
+COPY entrypoint.sh .
+
+RUN pip install mysql-compare
+
+CMD /bin/bash entrypoint.sh
