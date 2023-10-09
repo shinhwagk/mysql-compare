@@ -112,18 +112,13 @@ class MysqlRepair:
         source_row = get_table_row_by_key(self.source_con, self.database, self.table, self.table_key, diff_row)
         target_row = get_table_row_by_key(self.target_con, self.database, self.table, self.table_key, diff_row)
 
-        if source_row == target_row:
-            print("source row == target row")
-            print("source_row", source_row)
-            print("target_row", target_row)
-            return
-
         if target_row != diff_row:
             print(source_row)
             print(target_row)
-            print(diff_row)
             print("target row has changed.")
             return
+        else:
+            print(f"key {self.table_key} pass.")
 
         # query_row_statement = get_row_statement(self.database, self.table, self.table_key)
         # query_row_statement_for_update = f"{query_row_statement} for update"

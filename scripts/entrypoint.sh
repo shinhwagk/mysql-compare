@@ -1,3 +1,3 @@
 #!/bin/bash
-python dbcompare.py
-python dbrepair.py
+python /app/dbcompare.py
+python /app/dbrepair.py
