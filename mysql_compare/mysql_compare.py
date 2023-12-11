@@ -143,8 +143,10 @@ class MysqlTableCompare:
         self,
         source_dsn: dict,
         target_dsn: dict,
-        database: str,
-        table: str,
+        src_database: str,
+        src_table: str,
+        dst_database: str,
+        dst_table: str,
         parallel: int = 1,
         fetch_size: int = 100,
     ) -> None:
@@ -155,14 +157,19 @@ class MysqlTableCompare:
 
         self.fetch_size = fetch_size
 
-        self.database = database
-        self.table = table
+        self.src_database = src_database
+        self.src_table = src_table
+        self.dst_database = dst_database
+        self.dst_table = dst_table
 
         self.processed_rows_number = 0
 
         self.start_timestamp = time.time()
 
-        self.checkpoint_file = f"{self.database}.{self.table}.ckpt.json"
+        self.compare_name = f"{self.src_database}.{self.src_table}.{self.dst_database}.{self.dst_table}"
+
+        self.checkpoint_file = f"{self.compare_name}.ckpt.json"
+        self.done_file = f"{self.compare_name}.done"
 
     def get_full_table_orderby_keys(self, limit_size: int, keycols: list[tuple[str, str]], keyval: dict = None):
         _keyval = keyval
@@ -171,7 +178,7 @@ class MysqlTableCompare:
         while True:
             key_colns = ", ".join(list(map(lambda c: c[0], keycols)))
             if _keyval is None:
-                statement = f"SELECT {key_colns} FROM {self.database}.{self.table} ORDER BY {key_colns} limit {limit_size}"
+                statement = f"SELECT {key_colns} FROM {self.src_database}.{self.src_table} ORDER BY {key_colns} limit {limit_size}"
             else:
                 whereval = []
                 for j in range(0, len(keycols)):
@@ -187,7 +194,7 @@ class MysqlTableCompare:
                             raise Exception(f"data type: [{colt}] not suppert yet.")
                     whereval.append(" and ".join(unit))
                 where = "(" + ") or (".join(whereval) + ")"
-                statement = f"SELECT {key_colns} FROM {self.database}.{self.table} WHERE {where} ORDER BY {key_colns} limit {limit_size}"
+                statement = f"SELECT {key_colns} FROM {self.src_database}.{self.src_table} WHERE {where} ORDER BY {key_colns} limit {limit_size}"
 
             self.logger.debug(f"get_full_table_orderby_keys: {statement}, params {params}")
 
@@ -218,11 +225,11 @@ class MysqlTableCompare:
     ):
         try:
             _s_ts = time.time()
-            _target_rows = get_table_rows_by_keys(target_con, self.database, self.table, self.source_table_keys, source_key_vals)
+            _target_rows = get_table_rows_by_keys(target_con, self.dst_database, self.dst_table, self.source_table_keys, source_key_vals)
             self.logger.debug(f"threading running:[{process_id}] - target rows query elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(_target_rows)}.")
 
             _s_ts = time.time()
-            _source_rows = get_table_rows_by_keys(source_con, self.database, self.table, self.source_table_keys, source_key_vals)
+            _source_rows = get_table_rows_by_keys(source_con, self.src_database, self.src_table, self.source_table_keys, source_key_vals)
             self.logger.debug(f"threading running:[{process_id}] - source rows query elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(_source_rows)}.")
 
             _diff_rows = list(itertools.filterfalse(lambda x: x in _target_rows, _source_rows))
@@ -238,7 +245,7 @@ class MysqlTableCompare:
                 self.process_rows(process_id, source_con, target_con, source_key_vals, try_cnt + 1)
 
     def write_diff_row(self, rows: list[dict]):
-        with open(f"{self.database}.{self.table}.diff.log", "a", encoding="utf8") as f:
+        with open(f"{self.src_database}.{self.src_table}.diff.log", "a", encoding="utf8") as f:
             for row in rows:
                 f.write(f"{row}\n")
 
@@ -262,18 +269,18 @@ class MysqlTableCompare:
         return None
 
     def run(self) -> None:
-        self.logger = init_logger(f"{self.database}.{self.table}")
+        self.logger = init_logger(f"{self.src_database}.{self.src_table}.{self.dst_database}.{self.dst_table}")
 
-        self.logger.info(f"start {self.database}{self.table}")
-        if os.path.exists(f"{self.database}.{self.table}.done"):
-            print(f"compare {self.database}{self.table} done")
+        self.logger.info(f"start {self.compare_name}")
+        if os.path.exists(self.done_file):
+            print(f"compare {self.compare_name} done")
             return
 
         self.source_con = create_mysql_connection(self.source_dsn)
         self.target_con = create_mysql_connection(self.target_dsn)
 
-        source_table_struct = get_table_structure(self.source_con, self.database, self.table)
-        target_table_struct = get_table_structure(self.target_con, self.database, self.table)
+        source_table_struct = get_table_structure(self.source_con, self.src_database, self.src_table)
+        target_table_struct = get_table_structure(self.target_con, self.dst_database, self.dst_table)
 
         self.logger.info(f"source table structure: {source_table_struct}")
         self.logger.info(f"target table structure: {target_table_struct}")
@@ -284,11 +291,11 @@ class MysqlTableCompare:
 
         self.logger.info(f"source and target table structure same.")
 
-        self.source_table_keys = get_table_keys(self.source_con, self.database, self.table)
+        self.source_table_keys = get_table_keys(self.source_con, self.src_database, self.src_table)
         self.logger.info(f"source table keys: {self.source_table_keys}.")
 
-        self.source_table_rows_number = get_table_rows_number(self.source_con, self.database, self.table)
-        self.target_table_rows_number = get_table_rows_number(self.target_con, self.database, self.table)
+        self.source_table_rows_number = get_table_rows_number(self.source_con, self.src_database, self.src_table)
+        self.target_table_rows_number = get_table_rows_number(self.target_con, self.dst_database, self.dst_table)
 
         self.logger.info(f"source table rows number: {self.source_table_rows_number}.")
         self.logger.info(f"target table rows number: {self.target_table_rows_number}.")
@@ -354,7 +361,7 @@ class MysqlTableCompare:
 
         self.logger.info(f"compare completed, elapsed time:{get_elapsed_time(self.start_timestamp, 2)}.")
 
-        with open(f"{self.database}.{self.table}.done", "w", encoding="utf8") as f:
+        with open(self.done_file, "w", encoding="utf8") as f:
             pass
 
         if os.path.exists(self.checkpoint_file):
