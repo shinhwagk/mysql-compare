@@ -1,6 +1,6 @@
 FROM python:3.11.6
 
-RUN pip install mysql-compare -i https://mirrors.aliyun.com/pypi/simple/
+RUN pip install mysql-compare==0.0.17 -i https://mirrors.aliyun.com/pypi/simple/
 
 WORKDIR /app/
 
