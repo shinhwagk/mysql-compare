@@ -93,7 +93,7 @@ def get_table_keys(con: MySQLConnection, database, table) -> list[tuple[str, str
 def get_table_rows_by_keys(con: MySQLConnection, database, table, table_keys: list[tuple[str, str]], table_keys_vals: list[dict]) -> str:
     whereval = []
     for coln, colt in table_keys:
-        if "int" in colt or "char" in colt or "date" == colt or "decimal" == colt:
+        if "int" in colt or "double" in colt or "char" in colt or "date" == colt or "decimal" == colt:
             whereval.append(f"{coln} = %s")
         else:
             raise Exception(f"data type: [{colt}] not suppert yet.")
@@ -187,7 +187,7 @@ class MysqlTableCompare:
                     for i in range(0, len(_kcs)):
                         coln, colt = _kcs[i]
                         soy = ">" if i == len(_kcs) - 1 else "="
-                        if "int" in colt or "char" in colt or "date" == colt or "decimal" == colt:
+                        if "int" in colt or "double" in colt or "char" in colt or "date" == colt or "decimal" == colt:
                             unit.append(f"{coln} {soy} %s")
                             params.append(_keyval[coln])
                         else:
