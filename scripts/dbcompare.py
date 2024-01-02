@@ -31,11 +31,11 @@ with mysql.connector.connect(**args_source_dsn) as con:
         tables.append((db, tab))
 
 
-def f(db: str, tab: str):
+def f(src_db: str, src_tab: str):
     try:
-        MysqlTableCompare(args_source_dsn, args_target_dsn, db, tab, 10, 200).run()
+        MysqlTableCompare(args_source_dsn, args_target_dsn, src_db, src_tab, src_db, src_tab, 10, 200).run()
     except Exception as e:
-        with open(f"{db}.{tab}.err.log", "w", encoding="utf8") as f:
+        with open(f"{src_db}.{src_tab}.err.log", "w", encoding="utf8") as f:
             f.write(str(e))
 
 

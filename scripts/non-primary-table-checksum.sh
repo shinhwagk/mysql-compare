@@ -1,8 +1,8 @@
 echo 'db1.tab1
 db2.tab2' | while read line; do
 echo $line
-mysql -ughost -p54448hotINBOX -h10.50.0.234 -P3307 -e "select * from ${line}" >"${line}.src.data"
-mysql -ughost -p54448hotINBOX -h10.50.0.158 -P3306 -e "select * from ${line}" >"${line}.dst.data"
+[[ -f "${line}.src.data" ]] || mysql -ughost -p54448hotINBOX -h10.50.0.234 -P3307 -e "select * from ${line}" >"${line}.src.data"
+[[ -f "${line}.dst.data" ]] || mysql -ughost -p54448hotINBOX -h10.50.0.204 -P3306 -e "select * from ${line}" >"${line}.dst.data"
 done
 
 
