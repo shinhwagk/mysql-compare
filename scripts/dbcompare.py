@@ -9,6 +9,7 @@ from mysql_compare import MysqlTableCompare
 ARGS_SOURCE_DSN = os.environ.get("ARGS_SOURCE_DSN")
 ARGS_TARGET_DSN = os.environ.get("ARGS_TARGET_DSN")
 ARGS_DATABASES = os.environ.get("ARGS_DATABASES")
+ARGS_PARALLEL = os.environ.get("ARGS_PARALLEL") or 5
 
 _userpass, _hostport = ARGS_SOURCE_DSN.split("@")
 _user, _pass = _userpass.split("/")
@@ -49,8 +50,8 @@ if __name__ == "__main__":
         p.start()
 
         while True:
-            if len(process_pool) >= 3:
-                time.sleep(1)
+            if len(process_pool) >= int(ARGS_PARALLEL):
+                time.sleep(10)
             else:
                 break
 
@@ -58,4 +59,5 @@ if __name__ == "__main__":
                 if not prunning.is_alive():
                     prunning.join()
                     del process_pool[pname]
+                    print("compare done: ", db, tab)
             print("running:", process_pool.values())
