@@ -52,7 +52,7 @@ def get_table_keys(con: MySQLConnection, database, table) -> list[tuple[str, str
     return ukey
 
 
-def get_table_row_by_key(con: MySQLConnection, database, table, table_keys, diff_row) -> str:
+def get_table_row_by_key(con: MySQLConnection, database, table, table_keys, diff_row) -> dict:
     whereval = []
     params: list = []
     for coln, colt in table_keys:
@@ -68,7 +68,23 @@ def get_table_row_by_key(con: MySQLConnection, database, table, table_keys, diff
         return cur.fetchone()
 
 
-def compare(log_location, source_dsn, target_dsn, database, table):
+def repair_row(is_repair: bool, repair_con, table, repair_row: dict):
+    columns = ", ".join(repair_row.keys())
+    values_placeholder = ", ".join(["%s" for _ in repair_row.values()])
+
+    values = tuple(repair_row.values())
+    sql = f"REPLACE INTO {table} ({columns}) VALUES ({values_placeholder});"
+
+    print(f"row repair sql: {sql}")
+    print(f"row repair values: {values}")
+    if is_repair:
+        with repair_con.cursor() as cur:
+            cur.execute(sql, values)
+            affected_rows = cur.rowcount
+            print(f"row repair rows: {affected_rows}")
+
+
+def compare(log_location, source_dsn, target_dsn, database, table, is_repair: False):
     log_location = log_location
 
     source_con = connect(**source_dsn)
@@ -76,6 +92,12 @@ def compare(log_location, source_dsn, target_dsn, database, table):
 
     target_con = connect(**target_dsn)
     target_con.time_zone = "+00:00"
+
+    repair_dsn = target_dsn.copy()
+    repair_dsn["database"] = database
+    repair_con = connect(**repair_dsn)
+    repair_con.time_zone = "+00:00"
+    repair_con.autocommit = True
 
     database = database
     table = table
@@ -89,21 +111,20 @@ def compare(log_location, source_dsn, target_dsn, database, table):
             _val = lcls["_val"]
             source_row = get_table_row_by_key(source_con, database, table, table_key, _val)
             target_row = get_table_row_by_key(target_con, database, table, table_key, _val)
-            if target_row != target_row:
-                print(source_row)
-                print(target_row)
-                print("target row has changed.")
-                return
+            if source_row != target_row:
+                repair_row(is_repair, repair_con, table, source_row)
             else:
                 print(f"row pass {_val}.")
     source_con.close()
     target_con.close()
+    repair_con.close()
 
 
 if __name__ == "__main__":
     ARGS_SOURCE_DSN = os.environ.get("ARGS_SOURCE_DSN")
     ARGS_TARGET_DSN = os.environ.get("ARGS_TARGET_DSN")
     ARGS_LOG_LOCATION = os.environ.get("ARGS_LOG_LOCATION")
+    ARGS_REPAIR = os.environ.get("ARGS_REPAIR")
 
     _userpass, _hostport = ARGS_SOURCE_DSN.split("@")
     _user, _pass = _userpass.split("/")
@@ -117,9 +138,13 @@ if __name__ == "__main__":
 
     _log_location = ARGS_LOG_LOCATION
 
+    _repair = True if ARGS_REPAIR == "true" else False
+
     for f in [f for f in os.listdir(_log_location) if os.path.isfile(f)]:
         if f.endswith(".diff.log"):
             _f = f.split(".")
             _database = _f[0]
             _table = _f[1]
-            compare(_log_location, _source_dsn, _target_dsn, _database, _table)
+            compare(_log_location, _source_dsn, _target_dsn, _database, _table, _repair)
+
+    print("repair done.")
