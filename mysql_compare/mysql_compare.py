@@ -90,23 +90,25 @@ def get_table_keys(con: MySQLConnection, database, table) -> list[tuple[str, str
     return ukey
 
 
-def get_table_rows_by_keys(con: MySQLConnection, database, table, table_keys: list[tuple[str, str]], table_keys_vals: list[dict]) -> str:
-    whereval = []
+def get_table_rows_by_keys(con: MySQLConnection, database, table, table_keys: list[tuple[str, str]], table_rows: list[dict]) -> str:
+    # whereval = []
+    cols = []
     for coln, colt in table_keys:
         if "int" in colt or "double" in colt or "char" in colt or "date" == colt or "decimal" == colt:
-            whereval.append(f"{coln} = %s")
+            cols.append(coln)
+            # whereval.append(f"{coln} = %s")
         else:
             raise Exception(f"data type: [{colt}] not suppert yet.")
 
-    _s_stmt = f"SELECT * FROM {database}.{table} WHERE {' AND '.join(whereval)}"
+    _values = [list(d.values()) for d in table_rows]
+    _params = ["(" + ", ".join("%s" for _ in _v) + ")" for _v in _values]
 
-    _stmt = " UNION ALL ".join([_s_stmt for _ in range(0, len(table_keys_vals))])
+    _stmt = f"SELECT * FROM {database}.{table} WHERE ({', '.join(cols)}) IN ({', '.join(_params)}) "
 
-    _values = list(map(lambda r: r.values(), table_keys_vals))
-    _params = [item for t in _values for item in t]
+    _values = tuple(itertools.chain.from_iterable(_values))
 
     with con.cursor(dictionary=True) as cur:
-        cur.execute(_stmt, tuple(_params))
+        cur.execute(_stmt, tuple(_values))
         return [row for row in cur.fetchall()]
 
 
@@ -141,21 +143,23 @@ def create_mysql_connection(dsn: dict) -> MySQLConnection:
 class MysqlTableCompare:
     def __init__(
         self,
-        source_dsn: dict,
-        target_dsn: dict,
+        src_dsn: dict,
+        dst_dsn: dict,
         src_database: str,
         src_table: str,
         dst_database: str,
         dst_table: str,
         parallel: int = 1,
-        fetch_size: int = 100,
+        fetch_size: int = 6000,
+        shard_size: int = 200,
     ) -> None:
-        self.source_dsn = source_dsn
-        self.target_dsn = target_dsn
+        self.source_dsn = src_dsn
+        self.target_dsn = dst_dsn
 
         self.parallel = parallel
 
         self.fetch_size = fetch_size
+        self.shard_size = shard_size
 
         self.src_database = src_database
         self.src_table = src_table
@@ -170,6 +174,9 @@ class MysqlTableCompare:
 
         self.checkpoint_file = f"{self.compare_name}.ckpt.json"
         self.done_file = f"{self.compare_name}.done"
+
+        if self.fetch_size % self.shard_size != 0:
+            raise Exception(f"The remainder of the fetch_size divided by the shard_size must be equal to 0.")
 
     def get_full_table_orderby_keys(self, limit_size: int, keycols: list[tuple[str, str]], keyval: dict = None):
         _keyval = keyval
@@ -204,9 +211,9 @@ class MysqlTableCompare:
                 else:
                     cur.execute(statement, params=tuple(params.copy()))
                 params.clear()
-                for _ in range(0, int(limit_size / 200)):
-                    rows = cur.fetchmany(size=200)
-                    if len(rows) == 200:
+                for _ in range(0, int(limit_size / self.shard_size)):
+                    rows = cur.fetchmany(size=self.shard_size)
+                    if len(rows) == self.shard_size:
                         _keyval = rows[-1]
                         yield False, rows
                     elif len(rows) >= 1:
@@ -317,7 +324,7 @@ class MysqlTableCompare:
 
         self.logger.info(f"from checkpoint: {_checkpoint}")
 
-        for end, rows in self.get_full_table_orderby_keys(6000, self.source_table_keys, _checkpoint_row):
+        for end, rows in self.get_full_table_orderby_keys(self.fetch_size, self.source_table_keys, _checkpoint_row):
             _i, _sc, _tc, _cnt = _compare_conns.pop(0)
 
             _d_rows = []
