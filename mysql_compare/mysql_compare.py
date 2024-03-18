@@ -136,7 +136,7 @@ def create_mysql_connection(dsn: dict) -> MySQLConnection:
         except Exception as e:
             if i == 4:
                 raise e
-            print("create_mysql_connection", dsn, e)
+            print("try create mysql connection again.", dsn, e)
             time.sleep(5)
 
 
@@ -280,7 +280,7 @@ class MysqlTableCompare:
 
         self.logger.info(f"start {self.compare_name}")
         if os.path.exists(self.done_file):
-            print(f"compare {self.compare_name} done")
+            print(f"compare {self.compare_name} done.")
             return
 
         self.source_con = create_mysql_connection(self.source_dsn)
