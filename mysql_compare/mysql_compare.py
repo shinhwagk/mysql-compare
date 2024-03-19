@@ -2,7 +2,9 @@ import datetime
 import itertools
 import json
 import logging
+import math
 import os
+import queue
 import threading
 import time
 from dataclasses import dataclass
@@ -91,12 +93,10 @@ def get_table_keys(con: MySQLConnection, database, table) -> list[tuple[str, str
 
 
 def get_table_rows_by_keys(con: MySQLConnection, database, table, table_keys: list[tuple[str, str]], table_rows: list[dict]) -> str:
-    # whereval = []
     cols = []
     for coln, colt in table_keys:
         if "int" in colt or "double" in colt or "char" in colt or "date" == colt or "decimal" == colt:
             cols.append(coln)
-            # whereval.append(f"{coln} = %s")
         else:
             raise Exception(f"data type: [{colt}] not suppert yet.")
 
@@ -156,7 +156,7 @@ class MysqlTableCompare:
         self.source_dsn = src_dsn
         self.target_dsn = dst_dsn
 
-        self.parallel = parallel
+        self.parallel = math.ceil(parallel * 1.2)
 
         self.fetch_size = fetch_size
         self.shard_size = shard_size
@@ -167,6 +167,7 @@ class MysqlTableCompare:
         self.dst_table = dst_table
 
         self.processed_rows_number = 0
+        self.processed_diff_rows: list[dict] = []
 
         self.start_timestamp = time.time()
 
@@ -175,8 +176,89 @@ class MysqlTableCompare:
         self.checkpoint_file = f"{self.compare_name}.ckpt.json"
         self.done_file = f"{self.compare_name}.done"
 
+        self.task_queue = queue.Queue(maxsize=self.parallel)
+        self.task_result_queue = queue.Queue(maxsize=parallel)
+
         if self.fetch_size % self.shard_size != 0:
             raise Exception(f"The remainder of the fetch_size divided by the shard_size must be equal to 0.")
+
+    def result_worker(self, task_result_queue: queue.Queue):
+        _work_id = 0
+        _tasks: list[tuple[int, list[dict], list[dict], int]] = []
+        while True:
+            task: tuple[int, list[dict], list[dict], int] = task_result_queue.get()
+            if task is None:
+                break
+
+            _tasks.append(task)
+
+            while True:
+                matched = False
+                for i in range(len(_tasks) - 1, -1, -1):
+
+                    work_id, rows, diff_rows, row_proc_etime = _tasks[i]
+
+                    if work_id == _work_id:
+                        self.processed_rows_number += len(rows)
+
+                        if diff_rows:
+                            self.write_diff_row(diff_rows)
+
+                        self.processed_diff_rows += diff_rows
+
+                        if self.processed_rows_number % 10000 == 0:
+                            _l_row = rows[-1]
+                            self.write_checkpoint(_l_row, self.processed_rows_number)
+                            self.logger.debug(f"checkpoint:{_l_row}")
+
+                        # self.logger.debug(
+                        #     f"threading release[{threading.current_thread().name}], progress: {round(self.processed_rows_number/self.source_table_rows_number *100, 1)}%, {self.processed_rows_number}/{self.source_table_rows_number}, elapsed time:{row_proc_etime}s"
+                        # )
+                        self.logger.debug(
+                            f"threading release[{threading.current_thread().name}], progress: %, {self.processed_rows_number}/{self.source_table_rows_number}, elapsed time:{row_proc_etime}s"
+                        )
+
+                        _work_id += 1
+
+                        del _tasks[i]
+
+                        matched = True
+
+                if not matched:
+                    break
+
+    def worker(self, task_queue: queue.Queue, task_result_queue: queue.Queue):
+        src_conn = create_mysql_connection(self.source_dsn)
+        dst_conn = create_mysql_connection(self.target_dsn)
+
+        while True:
+            task: tuple[int, list[dict]] = task_queue.get()
+            if task is None:
+                break
+
+            process_id, source_key_vals = task
+
+            if source_key_vals is None:
+                break
+
+            if source_key_vals:
+                for try_cnt in range(1, 11):
+                    try:
+                        _s_ts = time.time()
+                        diff_rows = self.process_rows(process_id, src_conn, dst_conn, source_key_vals)
+                        task_result_queue.put((process_id, source_key_vals, diff_rows, get_elapsed_time(_s_ts)))
+                        break
+                    except Exception as e:
+                        self.logger.error(f"threading running:[{process_id}] - {str(e)}")
+                        if try_cnt == 10:
+                            self.logger.error(f"threading running:[{process_id}] - retry: {try_cnt}/10")
+                            raise e
+                        else:
+                            time.sleep(30)
+                            src_conn = create_mysql_connection(self.source_dsn)
+                            dst_conn = create_mysql_connection(self.target_dsn)
+
+            task_queue.task_done()
 
     def get_full_table_orderby_keys(self, limit_size: int, keycols: list[tuple[str, str]], keyval: dict = None):
         _keyval = keyval
@@ -215,41 +297,22 @@ class MysqlTableCompare:
                     rows = cur.fetchmany(size=self.shard_size)
                     if len(rows) == self.shard_size:
                         _keyval = rows[-1]
-                        yield False, rows
+                        yield rows
                     elif len(rows) >= 1:
-                        yield True, rows
+                        yield rows
                     else:
                         return
 
-    def process_rows(
-        self,
-        process_id: int,
-        source_con: MySQLConnection,
-        target_con: MySQLConnection,
-        source_key_vals: list[dict],
-        diff_rows: list[dict],
-        try_cnt: int = 0,
-    ):
-        try:
-            _s_ts = time.time()
-            _target_rows = get_table_rows_by_keys(target_con, self.dst_database, self.dst_table, self.source_table_keys, source_key_vals)
-            self.logger.debug(f"threading running:[{process_id}] - target rows query elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(_target_rows)}.")
+    def process_rows(self, process_id: int, source_con: MySQLConnection, target_con: MySQLConnection, source_key_vals: list[dict]):
+        _s_ts = time.time()
+        _target_rows = get_table_rows_by_keys(target_con, self.dst_database, self.dst_table, self.source_table_keys, source_key_vals)
+        self.logger.debug(f"threading running:[{process_id}] - target rows query elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(_target_rows)}.")
 
-            _s_ts = time.time()
-            _source_rows = get_table_rows_by_keys(source_con, self.src_database, self.src_table, self.source_table_keys, source_key_vals)
-            self.logger.debug(f"threading running:[{process_id}] - source rows query elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(_source_rows)}.")
+        _s_ts = time.time()
+        _source_rows = get_table_rows_by_keys(source_con, self.src_database, self.src_table, self.source_table_keys, source_key_vals)
+        self.logger.debug(f"threading running:[{process_id}] - source rows query elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(_source_rows)}.")
 
-            _diff_rows = list(itertools.filterfalse(lambda x: x in _target_rows, _source_rows))
-            diff_rows += _diff_rows
-
-        except Exception as e:
-            self.logger.error(f"threading running:[{process_id}] - {str(e)}")
-            if try_cnt >= 5:
-                self.logger.error(f"threading running:[{process_id}] - retry: {try_cnt}/5")
-                raise e
-            else:
-                time.sleep(30)
-                self.process_rows(process_id, source_con, target_con, source_key_vals, try_cnt + 1)
+        return list(itertools.filterfalse(lambda x: x in _target_rows, _source_rows))
 
     def write_diff_row(self, rows: list[dict]):
         with open(f"{self.src_database}.{self.src_table}.diff.log", "a", encoding="utf8") as f:
@@ -310,9 +373,6 @@ class MysqlTableCompare:
             self.logger.info("source table rows 0.")
             return
 
-        _thread_container: list[tuple[int, threading.Thread, MySQLConnection, MySQLConnection, list[dict], int, float, list[dict]]] = []
-        _compare_conns = [(i, create_mysql_connection(self.source_dsn), create_mysql_connection(self.target_dsn), 0) for i in range(self.parallel)]
-
         # loop full table
         _checkpoint = self.read_checkpoint()
         _checkpoint_row = None
@@ -324,47 +384,35 @@ class MysqlTableCompare:
 
         self.logger.info(f"from checkpoint: {_checkpoint}")
 
-        for end, rows in self.get_full_table_orderby_keys(self.fetch_size, self.source_table_keys, _checkpoint_row):
-            _i, _sc, _tc, _cnt = _compare_conns.pop(0)
+        _worker_threads: list[threading.Thread] = []
 
-            _d_rows = []
+        for _ in range(self.parallel):
+            t = threading.Thread(
+                target=self.worker,
+                args=(
+                    self.task_queue,
+                    self.task_result_queue,
+                ),
+            )
+            t.start()
+            _worker_threads.append(t)
 
-            _t = threading.Thread(target=self.process_rows, args=(_i, _sc, _tc, rows.copy(), _d_rows))
+        _worker_result_thread = threading.Thread(target=self.result_worker, args=(self.task_result_queue,))
+        _worker_result_thread.start()
 
-            _thread_container.append((_i, _t, _sc, _tc, rows.copy(), _cnt + 1, time.time(), _d_rows))
-            _t.start()
+        _work_id = 0
+        for rows in self.get_full_table_orderby_keys(self.fetch_size, self.source_table_keys, _checkpoint_row):
+            self.task_queue.put([_work_id, rows])
+            _work_id += 1
 
-            while (len(_thread_container) == self.parallel) or (end and len(_thread_container) >= 1):
-                _i, _t, _sc, _tc, _rows, _cnt, _s_ts, _d_rows = _thread_container.pop(0)
-                _t.join()
+        for _ in range(self.parallel):
+            self.task_queue.put(None)
 
-                self.processed_rows_number += len(_rows)
+        for t in _worker_threads:
+            t.join()
 
-                self.logger.debug(
-                    f"threading release[{_i}], progress: {round(self.processed_rows_number/self.source_table_rows_number *100, 1)}%, {self.processed_rows_number}/{self.source_table_rows_number}, elapsed time:{get_elapsed_time(_s_ts, 2)}s"
-                )
-
-                if len(_d_rows) >= 1:
-                    self.logger.info(f"discover diff repair rows: {len(_d_rows)}.")
-                    self.write_diff_row(_d_rows)
-
-                if _cnt >= 100:
-                    for _c in [_sc, _tc]:
-                        try:
-                            _c.close()
-                        except Exception as e:
-                            self.logger.error(f"close {_c.connection_id}, {e}")
-                    _sc = create_mysql_connection(self.source_dsn)
-                    _tc = create_mysql_connection(self.target_dsn)
-                    _cnt = 0
-
-                if self.processed_rows_number % 10000 == 0:
-                    _l_row = _rows[-1]
-                    self.write_checkpoint(_l_row, self.processed_rows_number)
-                    self.logger.debug(f"checkpoint:{_l_row}")
-
-                _compare_conns.append((_i, _sc, _tc, _cnt))
-                time.sleep(0.01)
+        self.task_result_queue.put(None)
+        _worker_result_thread.join()
 
         self.logger.info(f"compare completed, elapsed time:{get_elapsed_time(self.start_timestamp, 2)}.")
 
@@ -373,3 +421,14 @@ class MysqlTableCompare:
 
         if os.path.exists(self.checkpoint_file):
             os.remove(self.checkpoint_file)
+
+
+if __name__ == "__main__":
+    MysqlTableCompare(
+        {"host": "192.168.161.93", "port": 33061, "user": "root", "password": "my-secret-pw"},
+        {"host": "192.168.161.93", "port": 33062, "user": "root", "password": "my-secret-pw"},
+        "test1",
+        "tab1",
+        "test1",
+        "tab1",
+    ).run()

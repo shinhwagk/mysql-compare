@@ -9,7 +9,8 @@
 			"extensions": [
 				"ms-python.black-formatter",
 				"tamasfe.even-better-toml",
-				"eamodio.gitlens"
+				"eamodio.gitlens",
+				"ms-python.isort"
 			]
 		}
 	}
