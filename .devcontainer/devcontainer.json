@@ -8,7 +8,6 @@
 		"vscode": {
 			"extensions": [
 				"ms-python.black-formatter",
-				"tamasfe.even-better-toml",
 				"eamodio.gitlens",
 				"ms-python.isort"
 			]

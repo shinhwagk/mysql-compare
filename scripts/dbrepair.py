@@ -105,7 +105,7 @@ def compare(log_location, source_dsn, target_dsn, database, table, is_repair: Fa
     table_key = get_table_keys(source_con, database, table)
 
     lcls = {}
-    with open(f"{log_location}/{database}.{table}.diff.log") as f:
+    with open(os.path.join(log_location, f"{database}.{table}.diff.log"), "r") as f:
         for i in f.readlines():
             exec(f"_val={i}", globals(), lcls)
             _val = lcls["_val"]
@@ -140,11 +140,10 @@ if __name__ == "__main__":
 
     _repair = True if ARGS_REPAIR == "true" else False
 
-    for f in [f for f in os.listdir(_log_location) if os.path.isfile(f)]:
-        if f.endswith(".diff.log"):
-            _f = f.split(".")
-            _database = _f[0]
-            _table = _f[1]
-            compare(_log_location, _source_dsn, _target_dsn, _database, _table, _repair)
+    for f in [f for f in os.listdir(_log_location) if os.path.isfile(os.path.join(_log_location, f)) and f.endswith(".diff.log")]:
+        _f = f.split(".")
+        _database = _f[0]
+        _table = _f[1]
+        compare(_log_location, _source_dsn, _target_dsn, _database, _table, _repair)
 
     print("repair done.")
