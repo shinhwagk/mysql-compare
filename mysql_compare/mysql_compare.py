@@ -125,7 +125,7 @@ def get_full_table(con: MySQLConnection, database, table, cols: list[str]):
             yield row
 
 
-def get_elapsed_time(st: float, ndigits=None):
+def get_elapsed_time(st: float, ndigits=None) -> int | float:
     return round(time.time() - st, ndigits)
 
 
@@ -156,7 +156,7 @@ class MysqlTableCompare:
         self.source_dsn = src_dsn
         self.target_dsn = dst_dsn
 
-        self.parallel = math.ceil(parallel * 1.2)
+        self.parallel = parallel
 
         self.fetch_size = fetch_size
         self.shard_size = shard_size
@@ -176,17 +176,14 @@ class MysqlTableCompare:
         self.checkpoint_file = f"{self.compare_name}.ckpt.json"
         self.done_file = f"{self.compare_name}.done"
 
-        self.task_queue = queue.Queue(maxsize=self.parallel)
-        self.task_result_queue = queue.Queue(maxsize=parallel)
-
         if self.fetch_size % self.shard_size != 0:
             raise Exception(f"The remainder of the fetch_size divided by the shard_size must be equal to 0.")
 
     def result_worker(self, task_result_queue: queue.Queue):
-        _work_id = 0
-        _tasks: list[tuple[int, list[dict], list[dict], int]] = []
+        _batch_id = 0
+        _tasks: list[tuple[int, int, list[dict], list[dict], float]] = []
         while True:
-            task: tuple[int, list[dict], list[dict], int] = task_result_queue.get()
+            task: tuple[int, int, list[dict], list[dict], float] = task_result_queue.get()
             if task is None:
                 break
 
@@ -196,9 +193,9 @@ class MysqlTableCompare:
                 matched = False
                 for i in range(len(_tasks) - 1, -1, -1):
 
-                    work_id, rows, diff_rows, row_proc_etime = _tasks[i]
+                    task_id, batch_id, rows, diff_rows, row_proc_etime = _tasks[i]
 
-                    if work_id == _work_id:
+                    if batch_id == _batch_id:
                         self.processed_rows_number += len(rows)
 
                         if diff_rows:
@@ -211,14 +208,11 @@ class MysqlTableCompare:
                             self.write_checkpoint(_l_row, self.processed_rows_number)
                             self.logger.debug(f"checkpoint:{_l_row}")
 
-                        # self.logger.debug(
-                        #     f"threading release[{threading.current_thread().name}], progress: {round(self.processed_rows_number/self.source_table_rows_number *100, 1)}%, {self.processed_rows_number}/{self.source_table_rows_number}, elapsed time:{row_proc_etime}s"
-                        # )
                         self.logger.debug(
-                            f"threading release[{threading.current_thread().name}], progress: %, {self.processed_rows_number}/{self.source_table_rows_number}, elapsed time:{row_proc_etime}s"
+                            f"threading[{task_id}], batch[{batch_id}], progress: {round(self.processed_rows_number/max(1, self.source_table_rows_number)*100, 1)}%, {self.processed_rows_number}/{max(1, self.source_table_rows_number)}, elapsed time:{row_proc_etime}s"
                         )
 
-                        _work_id += 1
+                        _batch_id += 1
 
                         del _tasks[i]
 
@@ -227,36 +221,46 @@ class MysqlTableCompare:
                 if not matched:
                     break
 
-    def worker(self, task_queue: queue.Queue, task_result_queue: queue.Queue):
-        src_conn = create_mysql_connection(self.source_dsn)
-        dst_conn = create_mysql_connection(self.target_dsn)
+    def worker(
+        self,
+        task_id: int,
+        task_queue: queue.Queue,
+        task_result_queue: queue.Queue,
+        task_error_event: threading.Event,
+        task_error_queue: queue.Queue,
+    ):
+        _src_conn = create_mysql_connection(self.source_dsn)
+        _dst_conn = create_mysql_connection(self.target_dsn)
+        _err_try = 10
 
-        while True:
+        while not task_error_event.is_set():
             task: tuple[int, list[dict]] = task_queue.get()
             if task is None:
                 break
 
-            process_id, source_key_vals = task
-
-            if source_key_vals is None:
-                break
+            batch_id, source_key_vals = task
 
             if source_key_vals:
-                for try_cnt in range(1, 11):
+                for try_cnt in range(1, _err_try + 1):
                     try:
                         _s_ts = time.time()
-                        diff_rows = self.process_rows(process_id, src_conn, dst_conn, source_key_vals)
-                        task_result_queue.put((process_id, source_key_vals, diff_rows, get_elapsed_time(_s_ts)))
+                        diff_rows = self.process_rows(task_id, _src_conn, _dst_conn, source_key_vals)
+                        task_result_queue.put((task_id, batch_id, source_key_vals, diff_rows, get_elapsed_time(_s_ts, 2)))
                         break
                     except Exception as e:
-                        self.logger.error(f"threading running:[{process_id}] - {str(e)}")
+                        self.logger.error(f"threading:[{task_id}] - {str(e)}.")
+                        self.logger.error(f"threading:[{task_id}] - retry: {try_cnt}/{_err_try}")
+
                         if try_cnt == 10:
-                            self.logger.error(f"threading running:[{process_id}] - retry: {try_cnt}/10")
-                            raise e
+                            task_error_event.set()
+                            task_error_queue.put(e)
                         else:
                             time.sleep(30)
-                            src_conn = create_mysql_connection(self.source_dsn)
-                            dst_conn = create_mysql_connection(self.target_dsn)
+                            try:
+                                _src_conn = create_mysql_connection(self.source_dsn)
+                                _dst_conn = create_mysql_connection(self.target_dsn)
+                            except Exception as ce:
+                                self.logger.error(f"threading:[{task_id}] - {str(ce)}.")
 
             task_queue.task_done()
 
@@ -303,14 +307,20 @@ class MysqlTableCompare:
                     else:
                         return
 
-    def process_rows(self, process_id: int, source_con: MySQLConnection, target_con: MySQLConnection, source_key_vals: list[dict]):
+    def process_rows(
+        self,
+        task_id: int,
+        source_con: MySQLConnection,
+        target_con: MySQLConnection,
+        source_key_vals: list[dict],
+    ):
         _s_ts = time.time()
         _target_rows = get_table_rows_by_keys(target_con, self.dst_database, self.dst_table, self.source_table_keys, source_key_vals)
-        self.logger.debug(f"threading running:[{process_id}] - target rows query elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(_target_rows)}.")
+        self.logger.debug(f"threading:[{task_id}] - target rows query elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(_target_rows)}.")
 
         _s_ts = time.time()
         _source_rows = get_table_rows_by_keys(source_con, self.src_database, self.src_table, self.source_table_keys, source_key_vals)
-        self.logger.debug(f"threading running:[{process_id}] - source rows query elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(_source_rows)}.")
+        self.logger.debug(f"threading:[{task_id}] - source rows query elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(_source_rows)}.")
 
         return list(itertools.filterfalse(lambda x: x in _target_rows, _source_rows))
 
@@ -334,7 +344,6 @@ class MysqlTableCompare:
                             ckpt.checkpoint[k] = datetime.datetime.strptime(v, "%Y-%m-%d")
                         elif colt == "decimal":
                             ckpt.checkpoint[k] = Decimal(v)
-
             return ckpt
         return None
 
@@ -369,9 +378,9 @@ class MysqlTableCompare:
 
         self.logger.info(f"source table rows number: {self.source_table_rows_number}.")
         self.logger.info(f"target table rows number: {self.target_table_rows_number}.")
-        if self.source_table_rows_number == 0:
-            self.logger.info("source table rows 0.")
-            return
+        # if self.source_table_rows_number == 0:
+        #     self.logger.info("source table rows 0.")
+        #     return
 
         # loop full table
         _checkpoint = self.read_checkpoint()
@@ -386,33 +395,47 @@ class MysqlTableCompare:
 
         _worker_threads: list[threading.Thread] = []
 
-        for _ in range(self.parallel):
+        _task_queue_length = math.ceil(self.parallel * 1.2)
+        _task_queue = queue.Queue(maxsize=_task_queue_length)
+        _task_result_queue = queue.Queue(maxsize=self.parallel)
+        _task_error_queue = queue.Queue()
+        _task_error_event = threading.Event()
+
+        for t_id in range(_task_queue_length):
             t = threading.Thread(
                 target=self.worker,
                 args=(
-                    self.task_queue,
-                    self.task_result_queue,
+                    t_id,
+                    _task_queue,
+                    _task_result_queue,
+                    _task_error_event,
+                    _task_error_queue,
                 ),
             )
             t.start()
             _worker_threads.append(t)
 
-        _worker_result_thread = threading.Thread(target=self.result_worker, args=(self.task_result_queue,))
+        _worker_result_thread = threading.Thread(target=self.result_worker, args=(_task_result_queue,))
         _worker_result_thread.start()
 
-        _work_id = 0
+        _batch_id = 0
         for rows in self.get_full_table_orderby_keys(self.fetch_size, self.source_table_keys, _checkpoint_row):
-            self.task_queue.put([_work_id, rows])
-            _work_id += 1
+            _task_queue.put([_batch_id, rows])
+            _batch_id += 1
 
-        for _ in range(self.parallel):
-            self.task_queue.put(None)
+        for _ in range(_task_queue_length):
+            _task_queue.put(None)
 
         for t in _worker_threads:
             t.join()
 
-        self.task_result_queue.put(None)
+        _task_result_queue.put(None)
         _worker_result_thread.join()
+
+        if not _task_error_queue.empty():
+            err = _task_error_queue.get()
+            self.logger.error(f"task err {err}")
+            raise err
 
         self.logger.info(f"compare completed, elapsed time:{get_elapsed_time(self.start_timestamp, 2)}.")
 
