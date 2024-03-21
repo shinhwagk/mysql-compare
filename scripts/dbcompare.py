@@ -52,12 +52,12 @@ if __name__ == "__main__":
 
         for future in as_completed(future_to_task):
             task = future_to_task[future]
+            compare_success += 1
             try:
                 result = future.result()
                 print(f"compare done: {task}")
                 print(f"compare progress: {compare_success}/{len(tables)}")
             except Exception as e:
                 print(f"{task} generated an exception: {e}")
-            compare_success += 1
 
     print("compare all done.")
