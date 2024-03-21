@@ -36,7 +36,7 @@ def f(src_db: str, src_tab: str):
         try:
             _s_ts = time.time()
             MysqlTableCompare(args_source_dsn, args_target_dsn, src_db, src_tab, src_db, src_tab, 8, 6000, 400).run()
-            print(f"compare elapsed time: {src_db}.{src_tab} {round(time.time() - _s_ts, 2)}")
+            print(f"compare elapsed time: {src_db}.{src_tab} {round(time.time() - _s_ts, 2)}s.")
             return
         except Exception as e:
             with open(f"{src_db}.{src_tab}.err.log", "w", encoding="utf8") as f:
