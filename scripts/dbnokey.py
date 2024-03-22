@@ -65,7 +65,7 @@ if __name__ == "__main__":
         with open(os.path.join(_log_location, f), "r", encoding="utf8") as errfile:
             if "not have primary key or unique keys" in errfile.readline():
                 _database, _table = f.split(".")[:2]
-                print(f"start compare no key table {_database}.{_table}")
+                print(f"nokey table compare start {_database}.{_table}")
                 compare_tables(ARGS_SOURCE_DSN, ARGS_TARGET_DSN, _database, _table)
 
     print("nokey table compare complete.")
