@@ -389,11 +389,13 @@ class MysqlTableCompare:
         _worker_result_thread.start()
 
         _batch_id = 0
+        _debug_fetch_rows = 0
         for rows in self.get_full_table_orderby_keys(
             self.fetch_size,
             self.source_table_keys,
             _checkpoint_row,
         ):
+            _debug_fetch_rows += len(rows)
             _task_queue.put([_batch_id, rows])
             _batch_id += 1
 

@@ -68,23 +68,23 @@ def get_table_row_by_key(con: MySQLConnection, database, table, table_keys, diff
         return cur.fetchone()
 
 
-def repair_row(is_repair: bool, repair_con, table, repair_row: dict):
-    columns = ", ".join(repair_row.keys())
-    values_placeholder = ", ".join(["%s" for _ in repair_row.values()])
+def repair_row(repair_con, sql, values):
+    # columns = ", ".join(repair_row.keys())
+    # values_placeholder = ", ".join(["%s" for _ in repair_row.values()])
 
-    values = tuple(repair_row.values())
-    sql = f"REPLACE INTO {table} ({columns}) VALUES ({values_placeholder});"
+    # values = tuple(repair_row.values())
+    # sql = f"REPLACE INTO {table} ({columns}) VALUES ({values_placeholder});"
 
-    print(f"row repair sql: {sql}")
-    print(f"row repair values: {values}")
-    if is_repair:
-        with repair_con.cursor() as cur:
-            cur.execute(sql, values)
-            affected_rows = cur.rowcount
-            print(f"row repair rows: {affected_rows}")
+    # print(f"row repair sql: {sql}")
+    # print(f"row repair values: {values}")
+
+    with repair_con.cursor() as cur:
+        cur.execute(sql, values)
+        affected_rows = cur.rowcount
+        print(f"row repair rows: {affected_rows}")
 
 
-def compare(log_location, source_dsn, target_dsn, database, table, is_repair: False):
+def compare(log_location, source_dsn, target_dsn, database, table, is_repair: bool = False):
     log_location = log_location
 
     source_con = connect(**source_dsn)
@@ -112,7 +112,15 @@ def compare(log_location, source_dsn, target_dsn, database, table, is_repair: Fa
             source_row = get_table_row_by_key(source_con, database, table, table_key, _val)
             target_row = get_table_row_by_key(target_con, database, table, table_key, _val)
             if source_row != target_row:
-                repair_row(is_repair, repair_con, table, source_row)
+                columns = ", ".join(source_row.keys())
+                values_placeholder = ", ".join(["%s"] * len(source_row))
+                values = tuple(source_row.values())
+                sql = f"REPLACE INTO {table} ({columns}) VALUES ({values_placeholder});"
+
+                print(f"row repair sql: {sql}")
+                print(f"row repair values: {values}")
+                if is_repair:
+                    repair_row(repair_con, sql, values)
             else:
                 print(f"row pass {_val}.")
     source_con.close()
@@ -123,7 +131,7 @@ def compare(log_location, source_dsn, target_dsn, database, table, is_repair: Fa
 if __name__ == "__main__":
     ARGS_SOURCE_DSN = os.environ.get("ARGS_SOURCE_DSN")
     ARGS_TARGET_DSN = os.environ.get("ARGS_TARGET_DSN")
-    ARGS_LOG_LOCATION = os.environ.get("ARGS_LOG_LOCATION")
+    # ARGS_LOG_LOCATION = os.environ.get("ARGS_LOG_LOCATION")
     ARGS_REPAIR = os.environ.get("ARGS_REPAIR")
 
     _userpass, _hostport = ARGS_SOURCE_DSN.split("@")
@@ -136,7 +144,7 @@ if __name__ == "__main__":
     _host, _port = _hostport.split(":")
     _target_dsn = {"host": _host, "port": _port, "user": _user, "password": _pass}
 
-    _log_location = ARGS_LOG_LOCATION
+    _log_location = os.getcwd()
 
     _repair = True if ARGS_REPAIR == "true" else False
 

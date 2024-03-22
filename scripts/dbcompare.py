@@ -34,6 +34,7 @@ with mysql.connector.connect(**args_source_dsn) as con:
 def f(src_db: str, src_tab: str):
     for _ in range(0, 4):
         try:
+            print(f"compare start: {src_db}.{src_tab}.")
             _s_ts = time.time()
             MysqlTableCompare(args_source_dsn, args_target_dsn, src_db, src_tab, src_db, src_tab, 8, 6000, 400).run()
             print(f"compare elapsed time: {src_db}.{src_tab} {round(time.time() - _s_ts, 2)}s.")
