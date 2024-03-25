@@ -360,7 +360,12 @@ class MysqlTableCompare:
 
         self.logger.info(f"source and target table structure same.")
 
-        self.source_table_keys = get_table_keys(source_con, self.src_database, self.src_table)
+        try:
+            self.source_table_keys = get_table_keys(source_con, self.src_database, self.src_table)
+        except Exception as e:
+            self.logger.error(str(e))
+            return
+
         self.logger.info(f"source table keys: {self.source_table_keys}.")
 
         self.source_table_rows_number = max(1, get_table_rows_number(source_con, self.src_database, self.src_table))
