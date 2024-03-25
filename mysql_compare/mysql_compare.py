@@ -77,20 +77,21 @@ def get_table_keys(con: MySQLConnection, database: str, table: str) -> list[tupl
     keys = [(row[2], row[3]) for row in rows if row[1] == "PRIMARY KEY"] or [(row[2], row[3]) for row in rows if row[1] == "UNIQUE" and row[0] == rows[0][0]]
 
     if not keys:
-        raise Exception(f"{table} does not have primary key or unique keys.")
+        raise Exception(f"does not have primary key or unique keys.")
 
     return keys
 
 
 def get_table_rows_by_keys(con: MySQLConnection, database: str, table: str, table_keys: list[tuple[str, str]], table_keys_rows: list[dict]) -> str:
-    cols = [f"`{key[0]}`" for key in table_keys]
+    cols = [key[0] for key in table_keys]
     placeholders = ", ".join(["%s"] * len(cols))
 
     in_clause = ", ".join([f"({placeholders})" for _ in table_keys_rows])
 
     params = [val for row in table_keys_rows for val in (row[col] for col in cols)]
 
-    _stmt = f"SELECT * FROM {database}.{table} WHERE ({', '.join(cols)}) IN ({in_clause})"
+    formatted_cols = [f"`{c}`" for c in cols]
+    _stmt = f"SELECT * FROM {database}.{table} WHERE ({', '.join(formatted_cols)}) IN ({in_clause})"
 
     with con.cursor(dictionary=True) as cur:
         cur.execute(_stmt, tuple(params))
