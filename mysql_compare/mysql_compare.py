@@ -22,10 +22,20 @@ class Checkpoint:
 def init_logger(name: str | None = None) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
+
     file_handler = logging.FileHandler(f"{name}.log")
-    FILE_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    file_handler.setFormatter(logging.Formatter(FILE_LOG_FORMAT))
+    file_handler.setLevel(logging.DEBUG)
+
+    file_handler_error = logging.FileHandler(f"{name}.err.log")
+    file_handler_error.setLevel(logging.ERROR)
+
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    file_handler.setFormatter(formatter)
+    file_handler_error.setFormatter(formatter)
+
     logger.addHandler(file_handler)
+    logger.addHandler(file_handler_error)
+
     return logger
 
 
@@ -73,7 +83,7 @@ def get_table_keys(con: MySQLConnection, database: str, table: str) -> list[tupl
 
 
 def get_table_rows_by_keys(con: MySQLConnection, database: str, table: str, table_keys: list[tuple[str, str]], table_keys_rows: list[dict]) -> str:
-    cols = [key[0] for key in table_keys]
+    cols = [f"`{key[0]}`" for key in table_keys]
     placeholders = ", ".join(["%s"] * len(cols))
 
     in_clause = ", ".join([f"({placeholders})" for _ in table_keys_rows])
@@ -227,11 +237,17 @@ class MysqlTableCompare:
 
         task_queue.task_done()
 
-    def get_full_table_orderby_keys(self, limit_size: int, keycols: list[tuple[str, str]], keyval: dict = None):
+        for c in [_src_conn, _dst_conn]:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+    def get_full_table_orderby_keys(self, source_con: MySQLConnection, limit_size: int, keycols: list[tuple[str, str]], keyval: dict = None):
         _keyval = keyval
         # select * from where 1 = 1 and ((a > xxx) or (a = xxx and b > yyy) or (a = xxx and b = yyy and c > zzz)) order by a,b,c limit checksize
         params: list = []
-        _key_colns = ", ".join([col[0] for col in keycols])
+        _key_colns = ", ".join([f"`{col[0]}`" for col in keycols])
 
         while True:
             if _keyval is None:
@@ -244,7 +260,7 @@ class MysqlTableCompare:
                     for i, (coln, colt) in enumerate(_kcs):
                         soy = ">" if i == len(_kcs) - 1 else "="
                         if "int" in colt or "double" in colt or "char" in colt or "date" == colt or "decimal" == colt:
-                            unit.append(f"{coln} {soy} %s")
+                            unit.append(f"`{coln}` {soy} %s")
                             params.append(_keyval[coln])
                         else:
                             raise Exception(f"data type: [{colt}] not suppert yet.")
@@ -256,7 +272,7 @@ class MysqlTableCompare:
 
             _has_data = False
 
-            with self.source_con.cursor(dictionary=True) as cur:
+            with source_con.cursor(dictionary=True) as cur:
                 if len(params) == 0:
                     cur.execute(statement)
                 else:
@@ -321,31 +337,34 @@ class MysqlTableCompare:
     def run(self) -> None:
         self.logger = init_logger(f"{self.src_database}.{self.src_table}.{self.dst_database}.{self.dst_table}")
 
-        self.logger.info(f"start {self.compare_name}")
         if os.path.exists(self.done_file):
-            print(f"compare {self.compare_name} done.")
             return
 
-        self.source_con = recreate_connection(self.source_dsn)
-        self.target_con = recreate_connection(self.target_dsn)
+        self.logger.info(f"start {self.compare_name}.")
 
-        source_table_struct = get_table_structure(self.source_con, self.src_database, self.src_table)
-        target_table_struct = get_table_structure(self.target_con, self.dst_database, self.dst_table)
+        source_con = recreate_connection(self.source_dsn)
+        target_con = recreate_connection(self.target_dsn)
+
+        source_table_struct = get_table_structure(source_con, self.src_database, self.src_table)
+        target_table_struct = get_table_structure(target_con, self.dst_database, self.dst_table)
 
         self.logger.info(f"source table structure: {source_table_struct}")
         self.logger.info(f"target table structure: {target_table_struct}")
 
         table_struct_diff = list(itertools.filterfalse(lambda x: x in target_table_struct, source_table_struct))
         if not (len(source_table_struct) == len(target_table_struct) and len(table_struct_diff) == 0):
-            raise Exception(f"source and target table structure diff.")
+            with open(self.done_file, "w", encoding="utf8") as f:
+                pass
+            self.logger.error(f"source and target table structure diff.")
+            return
 
         self.logger.info(f"source and target table structure same.")
 
-        self.source_table_keys = get_table_keys(self.source_con, self.src_database, self.src_table)
+        self.source_table_keys = get_table_keys(source_con, self.src_database, self.src_table)
         self.logger.info(f"source table keys: {self.source_table_keys}.")
 
-        self.source_table_rows_number = max(1, get_table_rows_number(self.source_con, self.src_database, self.src_table))
-        self.target_table_rows_number = max(1, get_table_rows_number(self.target_con, self.dst_database, self.dst_table))
+        self.source_table_rows_number = max(1, get_table_rows_number(source_con, self.src_database, self.src_table))
+        self.target_table_rows_number = max(1, get_table_rows_number(target_con, self.dst_database, self.dst_table))
 
         self.logger.info(f"source table rows number: {self.source_table_rows_number}.")
         self.logger.info(f"target table rows number: {self.target_table_rows_number}.")
@@ -390,14 +409,18 @@ class MysqlTableCompare:
 
         _batch_id = 0
         _debug_fetch_rows = 0
-        for rows in self.get_full_table_orderby_keys(
-            self.fetch_size,
-            self.source_table_keys,
-            _checkpoint_row,
-        ):
-            _debug_fetch_rows += len(rows)
-            _task_queue.put([_batch_id, rows])
-            _batch_id += 1
+        try:
+            for rows in self.get_full_table_orderby_keys(
+                source_con,
+                self.fetch_size,
+                self.source_table_keys,
+                _checkpoint_row,
+            ):
+                _debug_fetch_rows += len(rows)
+                _task_queue.put([_batch_id, rows])
+                _batch_id += 1
+        except Exception as e:
+            self.logger.error(f"query table faile {str(e)}")
 
         for _ in range(_task_queue_length):
             _task_queue.put(None)
@@ -418,8 +441,8 @@ class MysqlTableCompare:
 
         if not _task_error_queue.empty():
             err = _task_error_queue.get()
-            self.logger.info(f"compare failed, elapsed time:{get_elapsed_time(self.start_timestamp, 2)}s.")
-            raise Exception(str(err))
+            self.logger.error(f"compare failed, {str(err)}.")
+            return
 
         self.logger.info(f"compare completed, elapsed time:{get_elapsed_time(self.start_timestamp, 2)}s.")
 
@@ -429,13 +452,8 @@ class MysqlTableCompare:
         if os.path.exists(self.checkpoint_file):
             os.remove(self.checkpoint_file)
 
-
-if __name__ == "__main__":
-    MysqlTableCompare(
-        {"host": "192.168.161.2", "port": 3306, "user": "dtle_sync", "password": "dtle_sync"},
-        {"host": "192.168.161.93", "port": 3306, "user": "dtle_sync", "password": "dtle_sync"},
-        "merchant_center_vela_v1",
-        "mc_products_to_tags",
-        "merchant_center_vela_v1",
-        "mc_products_to_tags",
-    ).run()
+        for c in [source_con, target_con]:
+            try:
+                c.close()
+            except Exception:
+                pass
