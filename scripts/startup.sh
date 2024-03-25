@@ -40,7 +40,16 @@ while true; do
 
     if [[ ! -f "$donefile" ]]; then
         echo "Running task in directory: $dirname"
-        (cd "$dirname" && python -u $PY_SCRIPT_COMPARE && python -u $PY_SCRIPT_NOKEY && python -u $PY_SCRIPT_REPAIR)
+        echo "Start task for dbcompare"
+        (cd "$dirname" && python -u $PY_SCRIPT_COMPARE)
+        echo "Start task for dbnokey"
+        if [[ ! -f "${dirname}/dbnokey.done" ]]; then
+            (cd "$dirname" && python -u $PY_SCRIPT_NOKEY >dbnokey.log && touch dbnokey.done)
+        fi
+        echo "Start task for dbrepair"
+        if [[ ! -f "${dirname}/dbrepair.done" ]]; then
+            (cd "$dirname" && python -u $PY_SCRIPT_REPAIR >dbrepair.log && touch dbrepair.done)
+        fi
         touch "$donefile"
         echo "Task completed for $dirname."
     else

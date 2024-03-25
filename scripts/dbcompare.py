@@ -1,6 +1,7 @@
 import os
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime
 
 import mysql.connector
 
@@ -31,17 +32,20 @@ with mysql.connector.connect(**args_source_dsn) as con:
         tables.append((db, tab))
 
 
-def f(src_db: str, src_tab: str):
-    for _ in range(0, 4):
-        try:
-            print(f"compare start: {src_db}.{src_tab}.")
-            _s_ts = time.time()
-            MysqlTableCompare(args_source_dsn, args_target_dsn, src_db, src_tab, src_db, src_tab, 8, 6000, 400).run()
-            print(f"compare elapsed time: {src_db}.{src_tab} {round(time.time() - _s_ts, 2)}s.")
-            return
-        except Exception as e:
-            with open(f"{src_db}.{src_tab}.err.log", "w", encoding="utf8") as f:
-                f.write(str(e))
+def get_current_datetime():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _f(src_db: str, src_tab: str):
+    _s_ts = time.time()
+    print(f"{get_current_datetime()} compare start: {src_db}.{src_tab}.")
+    try:
+        MysqlTableCompare(args_source_dsn, args_target_dsn, src_db, src_tab, src_db, src_tab, 8, 6000, 400).run()
+    except Exception as e:
+        with open(f"{src_db}.{src_tab}.err.log", "w", encoding="utf8") as f:
+            f.write(str(e))
+    finally:
+        print(f"{get_current_datetime()} compare done; elapsed time: {src_db}.{src_tab} {round(time.time() - _s_ts, 2)}s.")
 
 
 if __name__ == "__main__":
@@ -49,16 +53,15 @@ if __name__ == "__main__":
     parallel = 4
 
     with ProcessPoolExecutor(max_workers=parallel) as executor:
-        future_to_task = {executor.submit(f, src_db, src_tab): f"{src_db}.{src_tab}" for src_db, src_tab in tables}
+        future_to_task = {executor.submit(_f, src_db, src_tab): f"{src_db}.{src_tab}" for src_db, src_tab in tables}
 
         for future in as_completed(future_to_task):
             task = future_to_task[future]
             compare_success += 1
             try:
                 result = future.result()
-                print(f"compare done: {task}")
-                print(f"compare progress: {compare_success}/{len(tables)}")
+                print(f"{get_current_datetime()} compare progress: {compare_success}/{len(tables)}")
             except Exception as e:
-                print(f"{task} generated an exception: {e}")
+                print(f"{get_current_datetime()} {task} generated an exception: {e}")
 
-    print("compare all done.")
+    print(f"{get_current_datetime()} compare all done.")
