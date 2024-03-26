@@ -17,6 +17,7 @@ from mysql.connector import MySQLConnection, connect
 class Checkpoint:
     checkpoint: dict
     processed: int
+    different: int
 
 
 def init_logger(name: str | None = None) -> logging.Logger:
@@ -143,6 +144,7 @@ class MysqlTableCompare:
         self.dst_table = dst_table
 
         self.processed_rows_number = 0
+        self.different_rows_number = 0
 
         self.start_timestamp = time.time()
 
@@ -150,6 +152,7 @@ class MysqlTableCompare:
 
         self.checkpoint_file = f"{self.compare_name}.ckpt.json"
         self.done_file = f"{self.compare_name}.done"
+        self.different_file = f"{self.compare_name}.diff.log"
 
         if self.fetch_size % self.shard_size != 0:
             raise Exception(f"The remainder of the fetch_size divided by the shard_size must be equal to 0.")
@@ -163,6 +166,7 @@ class MysqlTableCompare:
             _task = task_result_queue.get()
 
             if _task is None:
+                task_result_queue.task_done()
                 break
 
             _tasks.append(_task)
@@ -174,22 +178,21 @@ class MysqlTableCompare:
                 self.processed_rows_number += len(rows)
 
                 if diff_rows:
-                    self.write_diff_row(diff_rows)
+                    self.write_diff_rows(diff_rows)
+                    self.different_rows_number += len(diff_rows)
 
                 if self.processed_rows_number % 10000 == 0:
-                    _l_row = rows[-1]
-                    self.write_checkpoint(_l_row, self.processed_rows_number)
-                    self.logger.debug(f"checkpoint:{_l_row}")
+                    self.write_checkpoint(rows[-1], self.processed_rows_number, self.different_rows_number)
+                    self.logger.debug(f"checkpoint: {rows[-1]}")
 
-                self.logger.debug(
-                    f"threading[{_thread_ident}], batch[{batch_id}], progress: {round(self.processed_rows_number/max(1, self.source_table_rows_number)*100, 1)}%, {self.processed_rows_number}/{self.source_table_rows_number}, elapsed time:{row_proc_etime}s"
-                )
+                _progress_rate = round(self.processed_rows_number / max(1, self.source_table_rows_number) * 100, 1)
+                self.logger.debug(f"threading[{_thread_ident}], batch[{batch_id}], progress: {_progress_rate}%, total rows: {self.source_table_rows_number}.")
+                self.logger.debug(f"threading[{_thread_ident}], batch[{batch_id}], different: {self.different_rows_number}.")
+                self.logger.debug(f"threading[{_thread_ident}], batch[{batch_id}], elapsed time:{row_proc_etime}s.")
 
                 _batch_id += 1
 
                 task_result_queue.task_done()
-
-        task_result_queue.task_done()
 
     def worker(
         self,
@@ -207,6 +210,7 @@ class MysqlTableCompare:
             task: tuple[int, list[dict]] = task_queue.get()
 
             if task is None:
+                task_queue.task_done()
                 break
 
             batch_id, source_key_vals = task
@@ -222,7 +226,7 @@ class MysqlTableCompare:
                         self.logger.error(f"threading:[{_thread_ident}] - {str(e)}.")
                         self.logger.error(f"threading:[{_thread_ident}] - retry: {try_cnt}/{_err_try}")
 
-                        if try_cnt == 10:
+                        if try_cnt == _err_try:
                             task_error_event.set()
                             task_error_queue.put(e)
                             self.logger.error(f"threading:[{_thread_ident}] - exit.")
@@ -235,8 +239,6 @@ class MysqlTableCompare:
                                 self.logger.error(f"threading:[{_thread_ident}] - {str(ce)}.")
 
             task_queue.task_done()
-
-        task_queue.task_done()
 
         for c in [_src_conn, _dst_conn]:
             try:
@@ -312,14 +314,14 @@ class MysqlTableCompare:
 
         return list(itertools.filterfalse(lambda x: x in _target_rows, _source_rows))
 
-    def write_diff_row(self, rows: list[dict]):
-        with open(f"{self.src_database}.{self.src_table}.diff.log", "a", encoding="utf8") as f:
+    def write_diff_rows(self, rows: list[dict]):
+        with open(self.different_file, "a", encoding="utf8") as f:
             for row in rows:
                 f.write(f"{row}\n")
 
-    def write_checkpoint(self, row: dict, processed: int):
+    def write_checkpoint(self, row: dict, processed: int, different: int):
         with open(self.checkpoint_file, "w", encoding="utf8") as f:
-            json.dump({"checkpoint": row, "processed": processed}, f, default=str)
+            json.dump({"checkpoint": row, "processed": processed, "different": different}, f, default=str)
 
     def read_checkpoint(self):
         if os.path.exists(self.checkpoint_file):
@@ -343,48 +345,37 @@ class MysqlTableCompare:
 
         self.logger.info(f"start {self.compare_name}.")
 
-        source_con = recreate_connection(self.source_dsn)
-        target_con = recreate_connection(self.target_dsn)
-
-        source_table_struct = get_table_structure(source_con, self.src_database, self.src_table)
-        target_table_struct = get_table_structure(target_con, self.dst_database, self.dst_table)
-
-        self.logger.info(f"source table structure: {source_table_struct}")
-        self.logger.info(f"target table structure: {target_table_struct}")
-
-        table_struct_diff = list(itertools.filterfalse(lambda x: x in target_table_struct, source_table_struct))
-        if not (len(source_table_struct) == len(target_table_struct) and len(table_struct_diff) == 0):
-            with open(self.done_file, "w", encoding="utf8") as f:
-                pass
-            self.logger.error(f"source and target table structure diff.")
-            return
-
-        self.logger.info(f"source and target table structure same.")
-
         try:
-            self.source_table_keys = get_table_keys(source_con, self.src_database, self.src_table)
+            with recreate_connection(self.source_dsn) as source_con, recreate_connection(self.target_dsn) as target_con:
+                source_table_struct: list[tuple[str, str]] = get_table_structure(source_con, self.src_database, self.src_table)
+                target_table_struct: list[tuple[str, str]] = get_table_structure(target_con, self.dst_database, self.dst_table)
+
+                self.logger.info(f"source table structure: {source_table_struct}.")
+                self.logger.info(f"target table structure: {target_table_struct}.")
+
+                table_struct_diff = set(source_table_struct) - set(target_table_struct)
+                if not source_table_struct or table_struct_diff:
+                    raise Exception(f"source and target table structure diff.")
+
+                self.logger.info(f"source and target table structure same.")
+
+                self.source_table_keys = get_table_keys(source_con, self.src_database, self.src_table)
+
+                self.logger.info(f"source table keys: {self.source_table_keys}.")
+
+                self.source_table_rows_number = max(1, get_table_rows_number(source_con, self.src_database, self.src_table))
+                self.logger.info(f"source table rows number: {self.source_table_rows_number}.")
         except Exception as e:
             self.logger.error(str(e))
             return
 
-        self.logger.info(f"source table keys: {self.source_table_keys}.")
-
-        self.source_table_rows_number = max(1, get_table_rows_number(source_con, self.src_database, self.src_table))
-        self.target_table_rows_number = max(1, get_table_rows_number(target_con, self.dst_database, self.dst_table))
-
-        self.logger.info(f"source table rows number: {self.source_table_rows_number}.")
-        self.logger.info(f"target table rows number: {self.target_table_rows_number}.")
-        # if self.source_table_rows_number == 0:
-        #     self.logger.info("source table rows 0.")
-        #     return
-
-        # loop full table
         _checkpoint = self.read_checkpoint()
         _checkpoint_row = None
 
-        if _checkpoint is not None:
+        if _checkpoint:
             self.logger.info(f"checkpoint: {_checkpoint}")
             self.processed_rows_number = _checkpoint.processed
+            self.different_rows_number = _checkpoint.different
             _checkpoint_row = _checkpoint.checkpoint
 
         self.logger.info(f"from checkpoint: {_checkpoint}")
@@ -395,7 +386,7 @@ class MysqlTableCompare:
         _task_queue = queue.Queue(maxsize=_task_queue_length)
         _task_result_queue = queue.Queue(maxsize=self.parallel)
         _task_error_queue = queue.Queue()
-        _task_error_event = threading.Event()
+        _task_error_thread_event = threading.Event()
 
         for _ in range(_task_queue_length):
             t = threading.Thread(
@@ -403,28 +394,31 @@ class MysqlTableCompare:
                 args=(
                     _task_queue,
                     _task_result_queue,
-                    _task_error_event,
+                    _task_error_thread_event,
                     _task_error_queue,
                 ),
             )
             t.start()
+            self.logger.debug(f"start worker thread {t.name}")
             _worker_threads.append(t)
 
         _worker_result_thread = threading.Thread(target=self.result_worker, args=(_task_result_queue,))
         _worker_result_thread.start()
+        self.logger.debug(f"start worker result thread {_worker_result_thread.name}")
 
         _batch_id = 0
         _debug_fetch_rows = 0
         try:
-            for rows in self.get_full_table_orderby_keys(
-                source_con,
-                self.fetch_size,
-                self.source_table_keys,
-                _checkpoint_row,
-            ):
-                _debug_fetch_rows += len(rows)
-                _task_queue.put([_batch_id, rows])
-                _batch_id += 1
+            with recreate_connection(self.source_dsn) as scon:
+                for rows in self.get_full_table_orderby_keys(
+                    scon,
+                    self.fetch_size,
+                    self.source_table_keys,
+                    _checkpoint_row,
+                ):
+                    _debug_fetch_rows += len(rows)
+                    _task_queue.put([_batch_id, rows])
+                    _batch_id += 1
         except Exception as e:
             self.logger.error(f"query table faile {str(e)}")
 
@@ -452,14 +446,18 @@ class MysqlTableCompare:
 
         self.logger.info(f"compare completed, elapsed time:{get_elapsed_time(self.start_timestamp, 2)}s.")
 
-        with open(self.done_file, "w", encoding="utf8") as f:
-            pass
+        open(self.done_file, "w").close()
 
         if os.path.exists(self.checkpoint_file):
             os.remove(self.checkpoint_file)
 
-        for c in [source_con, target_con]:
-            try:
-                c.close()
-            except Exception:
-                pass
+
+# if __name__ == "__main__":
+#     MysqlTableCompare(
+#         {"host": "192.168.161.2", "port": 3306, "user": "dtle_sync", "password": "dtle_sync"},
+#         {"host": "192.168.161.93", "port": 3306, "user": "dtle_sync", "password": "dtle_sync"},
+#         "merchant_center_vela_v1",
+#         "mc_products_to_tags",
+#         "merchant_center_vela_v1",
+#         "mc_products_to_tags",
+#     ).run()
