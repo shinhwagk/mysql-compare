@@ -445,7 +445,7 @@ class MysqlTableCompare:
 
         for _ in range(_task_queue_length):
             _task_queue.put(None)
-        self.logger.debug(f"queue:[task_queue] {len(_task_queue_length)} - try close.")
+        self.logger.debug(f"queue:[task_queue] {_task_queue_length} - try close.")
 
         _task_queue.join()
         self.logger.debug(f"queue:[task_queue] - release.")
