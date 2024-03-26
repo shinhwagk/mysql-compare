@@ -324,18 +324,19 @@ class MysqlTableCompare:
             json.dump({"checkpoint": row, "processed": processed, "different": different}, f, default=str)
 
     def read_checkpoint(self):
-        if os.path.exists(self.checkpoint_file):
-            with open(self.checkpoint_file, "r", encoding="utf8") as f:
-                ckpt: Checkpoint = Checkpoint(**json.load(f))
-            for k, v in ckpt.checkpoint.items():
-                for coln, colt in self.source_table_keys:
-                    if k == coln:
-                        if colt == "date":
-                            ckpt.checkpoint[k] = datetime.datetime.strptime(v, "%Y-%m-%d")
-                        elif colt == "decimal":
-                            ckpt.checkpoint[k] = Decimal(v)
-            return ckpt
-        return None
+        if not os.path.exists(self.checkpoint_file):
+            return None
+
+        with open(self.checkpoint_file, "r", encoding="utf8") as f:
+            ckpt: Checkpoint = Checkpoint(**json.load(f))
+
+        for coln, colt in self.source_table_keys:
+            if coln in ckpt.checkpoint:
+                if colt == "date":
+                    ckpt.checkpoint[coln] = datetime.datetime.strptime(ckpt.checkpoint[coln], "%Y-%m-%d")
+                elif colt == "decimal":
+                    ckpt.checkpoint[coln] = Decimal(ckpt.checkpoint[coln])
+        return ckpt
 
     def run(self) -> None:
         self.logger = init_logger(f"{self.src_database}.{self.src_table}.{self.dst_database}.{self.dst_table}")
@@ -452,12 +453,12 @@ class MysqlTableCompare:
             os.remove(self.checkpoint_file)
 
 
-# if __name__ == "__main__":
-#     MysqlTableCompare(
-#         {"host": "192.168.161.2", "port": 3306, "user": "dtle_sync", "password": "dtle_sync"},
-#         {"host": "192.168.161.93", "port": 3306, "user": "dtle_sync", "password": "dtle_sync"},
-#         "merchant_center_vela_v1",
-#         "mc_products_to_tags",
-#         "merchant_center_vela_v1",
-#         "mc_products_to_tags",
-#     ).run()
+if __name__ == "__main__":
+    MysqlTableCompare(
+        {"host": "192.168.161.2", "port": 3306, "user": "dtle_sync", "password": "dtle_sync"},
+        {"host": "192.168.161.93", "port": 3306, "user": "dtle_sync", "password": "dtle_sync"},
+        "merchant_center_vela_v1",
+        "mc_products_to_tags",
+        "merchant_center_vela_v1",
+        "mc_products_to_tags",
+    ).run()
