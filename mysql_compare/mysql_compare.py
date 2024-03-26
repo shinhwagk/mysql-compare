@@ -7,6 +7,7 @@ import os
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -23,19 +24,18 @@ class Checkpoint:
 def init_logger(name: str | None = None) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
-
-    file_handler = logging.FileHandler(f"{name}.log")
-    file_handler.setLevel(logging.DEBUG)
-
-    file_handler_error = logging.FileHandler(f"{name}.err.log")
-    file_handler_error.setLevel(logging.ERROR)
-
     formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    file_handler.setFormatter(formatter)
-    file_handler_error.setFormatter(formatter)
 
-    logger.addHandler(file_handler)
-    logger.addHandler(file_handler_error)
+    log_file_configs = [
+        {"filename": f"{name}.log", "level": logging.DEBUG},
+        {"filename": f"{name}.err.log", "level": logging.ERROR},
+    ]
+
+    for config in log_file_configs:
+        handler = logging.FileHandler(config["filename"])
+        handler.setLevel(config["level"])
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
 
     return logger
 
@@ -148,7 +148,11 @@ class MysqlTableCompare:
 
         self.start_timestamp = time.time()
 
-        self.compare_name = f"{self.src_database}.{self.src_table}.{self.dst_database}.{self.dst_table}"
+        self.compare_name: str = f"{self.src_database}.{self.src_table}"
+        if self.src_database == self.dst_database and self.src_table != self.dst_table:
+            self.compare_name += f".{self.dst_table}"
+        elif self.src_database != self.dst_database:
+            self.compare_name += f".{self.dst_database}.{self.dst_table}"
 
         self.checkpoint_file = f"{self.compare_name}.ckpt.json"
         self.done_file = f"{self.compare_name}.done"
@@ -160,7 +164,7 @@ class MysqlTableCompare:
     def result_worker(self, task_result_queue: queue.Queue):
         _thread_ident = threading.current_thread().name
         _batch_id = 0
-        _tasks: list[tuple[int, list[dict], list[dict], float]] = []
+        _tasks: list[tuple[int, list[dict], list[dict]]] = []
 
         while True:
             _task = task_result_queue.get()
@@ -173,22 +177,21 @@ class MysqlTableCompare:
             _tasks.sort(key=lambda x: x[0])
 
             while _tasks and _tasks[0][0] == _batch_id:
-                batch_id, rows, diff_rows, row_proc_etime = _tasks.pop(0)
+                batch_id, source_key_vals, diff_rows = _tasks.pop(0)
 
-                self.processed_rows_number += len(rows)
+                self.processed_rows_number += len(source_key_vals)
 
                 if diff_rows:
                     self.write_diff_rows(diff_rows)
                     self.different_rows_number += len(diff_rows)
 
                 if self.processed_rows_number % 10000 == 0:
-                    self.write_checkpoint(rows[-1], self.processed_rows_number, self.different_rows_number)
-                    self.logger.debug(f"checkpoint: {rows[-1]}")
+                    self.write_checkpoint(source_key_vals[-1], self.processed_rows_number, self.different_rows_number)
+                    self.logger.debug(f"checkpoint: {source_key_vals[-1]}")
 
                 _progress_rate = round(self.processed_rows_number / max(1, self.source_table_rows_number) * 100, 1)
-                self.logger.debug(f"threading[{_thread_ident}], batch[{batch_id}], progress: {_progress_rate}%, total rows: {self.source_table_rows_number}.")
-                self.logger.debug(f"threading[{_thread_ident}], batch[{batch_id}], different: {self.different_rows_number}.")
-                self.logger.debug(f"threading[{_thread_ident}], batch[{batch_id}], elapsed time:{row_proc_etime}s.")
+                self.logger.debug(f"threading[{_thread_ident}], batch[{batch_id}] - progress: {_progress_rate}%, total rows: {self.source_table_rows_number}.")
+                self.logger.debug(f"threading[{_thread_ident}], batch[{batch_id}] - different: {self.different_rows_number}.")
 
                 _batch_id += 1
 
@@ -218,25 +221,24 @@ class MysqlTableCompare:
             if source_key_vals:
                 for try_cnt in range(1, _err_try + 1):
                     try:
-                        _s_ts = time.time()
-                        diff_rows = self.process_rows(_src_conn, _dst_conn, source_key_vals)
-                        task_result_queue.put((batch_id, source_key_vals, diff_rows, get_elapsed_time(_s_ts, 2)))
+                        diff_rows = self.process_rows(batch_id, _src_conn, _dst_conn, source_key_vals)
+                        task_result_queue.put((batch_id, source_key_vals, diff_rows))
                         break
                     except Exception as e:
-                        self.logger.error(f"threading:[{_thread_ident}] - {str(e)}.")
-                        self.logger.error(f"threading:[{_thread_ident}] - retry: {try_cnt}/{_err_try}")
+                        self.logger.error(f"threading:[{_thread_ident}], batch[{batch_id}] - {str(e)}.")
+                        self.logger.error(f"threading:[{_thread_ident}], batch[{batch_id}] - retry: {try_cnt}/{_err_try}")
 
                         if try_cnt == _err_try:
                             task_error_event.set()
                             task_error_queue.put(e)
-                            self.logger.error(f"threading:[{_thread_ident}] - exit.")
+                            self.logger.error(f"threading:[{_thread_ident}], batch[{batch_id}] - exit.")
                         else:
                             time.sleep(1)
                             try:
                                 _src_conn = recreate_connection(self.source_dsn, _src_conn)
                                 _dst_conn = recreate_connection(self.target_dsn, _dst_conn)
                             except Exception as ce:
-                                self.logger.error(f"threading:[{_thread_ident}] - {str(ce)}.")
+                                self.logger.error(f"threading:[{_thread_ident}], batch[{batch_id}] - {str(ce)}.")
 
             task_queue.task_done()
 
@@ -271,7 +273,7 @@ class MysqlTableCompare:
                 where = "(" + ") or (".join(whereval) + ")"
                 statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} WHERE {where} ORDER BY {_key_colns} limit {limit_size}"
 
-            self.logger.debug(f"get_full_table_orderby_keys: {statement}, params {params}")
+            self.logger.debug(f"threading:[{threading.current_thread().name}] - get_full_table_orderby_keys: {statement}, params {params}")
 
             _has_data = False
 
@@ -298,21 +300,39 @@ class MysqlTableCompare:
 
     def process_rows(
         self,
+        batch_id: int,
         source_con: MySQLConnection,
         target_con: MySQLConnection,
         source_key_vals: list[dict],
     ):
         _thread_ident = threading.current_thread().name
 
-        _s_ts = time.time()
-        _target_rows: list[dict] = get_table_rows_by_keys(target_con, self.dst_database, self.dst_table, self.source_table_keys, source_key_vals)
-        self.logger.debug(f"threading:[{_thread_ident}] - target rows query elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(_target_rows)}.")
+        self.logger.debug(f"threading:[{_thread_ident}], batch[{batch_id}] - start compare rows {len(source_key_vals)}.")
+
+        tasks = {
+            "source": (source_con, self.src_database, self.src_table, self.source_table_keys, source_key_vals),
+            "target": (target_con, self.dst_database, self.dst_table, self.source_table_keys, source_key_vals),
+        }
+
+        fetch_rows = lambda db_con, db_name, table_name, table_keys, key_vals: get_table_rows_by_keys(db_con, db_name, table_name, table_keys, key_vals)
 
         _s_ts = time.time()
-        _source_rows: list[dict] = get_table_rows_by_keys(source_con, self.src_database, self.src_table, self.source_table_keys, source_key_vals)
-        self.logger.debug(f"threading:[{_thread_ident}] - source rows query elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(_source_rows)}.")
 
-        return list(itertools.filterfalse(lambda x: x in _target_rows, _source_rows))
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_to_task = {executor.submit(fetch_rows, *tasks[task]): task for task in tasks}
+            tasks = {key: [] for key in tasks}
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
+                try:
+                    tasks[task] = future.result()
+                except Exception as e:
+                    raise Exception(f"task[{task}] - fetch rows error: {str(e)}") from e
+
+        self.logger.debug(
+            f"threading:[{_thread_ident}], batch[{batch_id}] - compare rows elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(tasks[task])}."
+        )
+
+        return list(itertools.filterfalse(lambda x: x in tasks["target"], tasks["source"]))
 
     def write_diff_rows(self, rows: list[dict]):
         with open(self.different_file, "a", encoding="utf8") as f:
@@ -339,7 +359,7 @@ class MysqlTableCompare:
         return ckpt
 
     def run(self) -> None:
-        self.logger = init_logger(f"{self.src_database}.{self.src_table}.{self.dst_database}.{self.dst_table}")
+        self.logger = init_logger(self.compare_name)
 
         if os.path.exists(self.done_file):
             return
@@ -425,27 +445,29 @@ class MysqlTableCompare:
 
         for _ in range(_task_queue_length):
             _task_queue.put(None)
+        self.logger.debug(f"queue:[task_queue] {len(_task_queue_length)} - try close.")
 
         _task_queue.join()
         self.logger.debug(f"queue:[task_queue] - release.")
 
         for t in _worker_threads:
             t.join()
-            self.logger.debug(f"threading:[worker][{t.ident}] - release.")
+            self.logger.debug(f"threading:[worker][{t.name}] - release.")
 
         _task_result_queue.put(None)
+        self.logger.debug(f"queue:[task_result_queue] - try close.")
         _task_result_queue.join()
         self.logger.debug(f"queue:[task_result_queue] - release.")
 
         _worker_result_thread.join()
-        self.logger.debug(f"threading:[worker_result][{t.ident}] - release.")
+        self.logger.debug(f"threading:[worker_result][{_worker_result_thread.name}] - release.")
 
         if not _task_error_queue.empty():
             err = _task_error_queue.get()
             self.logger.error(f"compare failed, {str(err)}.")
             return
 
-        self.logger.info(f"compare completed, elapsed time:{get_elapsed_time(self.start_timestamp, 2)}s.")
+        self.logger.info(f"compare completed, processed rows: {self.processed_rows_number} elapsed time: {get_elapsed_time(self.start_timestamp, 2)}s.")
 
         open(self.done_file, "w").close()
 
