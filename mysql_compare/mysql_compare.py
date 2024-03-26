@@ -83,7 +83,7 @@ def get_table_keys(con: MySQLConnection, database: str, table: str) -> list[tupl
     return keys
 
 
-def get_table_rows_by_keys(con: MySQLConnection, database: str, table: str, table_keys: list[tuple[str, str]], table_keys_rows: list[dict]) -> str:
+def get_table_rows_by_keys(con: MySQLConnection, database: str, table: str, table_keys: list[tuple[str, str]], table_keys_rows: list[dict]) -> list[dict]:
     cols = [key[0] for key in table_keys]
     placeholders = ", ".join(["%s"] * len(cols))
 
@@ -305,11 +305,11 @@ class MysqlTableCompare:
         _thread_ident = threading.current_thread().name
 
         _s_ts = time.time()
-        _target_rows = get_table_rows_by_keys(target_con, self.dst_database, self.dst_table, self.source_table_keys, source_key_vals)
+        _target_rows: list[dict] = get_table_rows_by_keys(target_con, self.dst_database, self.dst_table, self.source_table_keys, source_key_vals)
         self.logger.debug(f"threading:[{_thread_ident}] - target rows query elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(_target_rows)}.")
 
         _s_ts = time.time()
-        _source_rows = get_table_rows_by_keys(source_con, self.src_database, self.src_table, self.source_table_keys, source_key_vals)
+        _source_rows: list[dict] = get_table_rows_by_keys(source_con, self.src_database, self.src_table, self.source_table_keys, source_key_vals)
         self.logger.debug(f"threading:[{_thread_ident}] - source rows query elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(_source_rows)}.")
 
         return list(itertools.filterfalse(lambda x: x in _target_rows, _source_rows))
