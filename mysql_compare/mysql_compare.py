@@ -7,7 +7,7 @@ import math
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from decimal import Decimal
 
 from mysql.connector import MySQLConnection, connect
@@ -16,7 +16,7 @@ from mysql.connector.pooling import MySQLConnectionPool
 
 @dataclass
 class Checkpoint:
-    checkpoint: dict
+    row: dict
     processed: int
     different: int
 
@@ -109,9 +109,6 @@ class MysqlTableCompare:
         self.dst_database = dst_database
         self.dst_table = dst_table
 
-        self.processed_rows_number = 0
-        self.different_rows_number = 0
-
         self.start_timestamp = time.time()
 
         self.compare_name: str = f"{self.src_database}.{self.src_table}"
@@ -135,6 +132,11 @@ class MysqlTableCompare:
         self.logger.info(f"target table connect pool create.")
         self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=math.ceil(self.parallel * 1.2), **self.target_dsn)
 
+        self.checkpoint = self.read_checkpoint()
+
+        self.processed_rows_number = self.checkpoint.processed
+        self.different_rows_number = self.checkpoint.different
+
     # batch_id, source_key_vals, diff_rows
     def processing_result(self, cur_batch_id, _tasks: list[tuple[int, list[dict], list[dict]]]):
         _batch_id = cur_batch_id
@@ -144,15 +146,18 @@ class MysqlTableCompare:
         while _tasks and _tasks[0][0] == _batch_id:
             batch_id, source_key_vals, diff_rows = _tasks.pop(0)
 
+            self.processed_rows_number += len(source_key_vals)
+
             if diff_rows:
                 self.write_different_rows(diff_rows)
                 self.different_rows_number += len(diff_rows)
 
-            self.processed_rows_number += len(source_key_vals)
-
-            if self.processed_rows_number % 10000 == 0:
-                self.write_checkpoint(source_key_vals[-1], self.processed_rows_number, self.different_rows_number)
-                self.logger.info(f"checkpoint: {source_key_vals[-1]}")
+            if self.processed_rows_number % 10000 == 0 or diff_rows:
+                self.checkpoint.processed = self.processed_rows_number
+                self.checkpoint.different = self.different_rows_number
+                self.checkpoint.row = source_key_vals[-1]
+                self.write_checkpoint()
+                self.logger.info(f"checkpoint: {self.checkpoint}")
 
             _progress_rate = round(self.processed_rows_number / max(1, self.source_table_rows_number) * 100, 1)
             self.logger.debug(
@@ -168,23 +173,23 @@ class MysqlTableCompare:
             for row in rows:
                 f.write(f"{row}\n")
 
-    def write_checkpoint(self, row: dict, processed: int, different: int):
+    def write_checkpoint(self):
         with open(self.checkpoint_file, "w", encoding="utf8") as f:
-            json.dump({"checkpoint": row, "processed": processed, "different": different}, f, default=str)
+            json.dump(asdict(self.checkpoint), f, default=str)
 
     def read_checkpoint(self):
         if not os.path.exists(self.checkpoint_file):
-            return None
+            return Checkpoint(None, 0, 0)
 
         with open(self.checkpoint_file, "r", encoding="utf8") as f:
             ckpt: Checkpoint = Checkpoint(**json.load(f))
 
         for coln, colt in self.source_table_keys:
-            if coln in ckpt.checkpoint:
+            if coln in ckpt.row:
                 if colt == "date":
-                    ckpt.checkpoint[coln] = datetime.datetime.strptime(ckpt.checkpoint[coln], "%Y-%m-%d")
+                    ckpt.row[coln] = datetime.datetime.strptime(ckpt.row[coln], "%Y-%m-%d")
                 elif colt == "decimal":
-                    ckpt.checkpoint[coln] = Decimal(ckpt.checkpoint[coln])
+                    ckpt.row[coln] = Decimal(ckpt.row[coln])
         return ckpt
 
     def get_table_rows_by_keys(self, con: MySQLConnectionPool, database, table, table_keys_rows: list[dict]) -> list[dict]:
@@ -203,53 +208,54 @@ class MysqlTableCompare:
                 cur.execute(_stmt, tuple(params))
                 return cur.fetchall()
 
-    def get_full_table_keys_order(self, source_con: MySQLConnection, keycols: list[tuple[str, str]], ckpt_row: dict = None):
+    def get_full_table_keys_order(self, keycols: list[tuple[str, str]], ckpt_row: dict = None):
         _keyval = ckpt_row
         # select * from where 1 = 1 and ((a > xxx) or (a = xxx and b > yyy) or (a = xxx and b = yyy and c > zzz)) order by a,b,c limit checksize
         params: list = []
         _key_colns = ", ".join([f"`{col[0]}`" for col in keycols])
 
-        while True:
-            if _keyval is None:
-                statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} ORDER BY {_key_colns} limit {self.limit_size}"
-            else:
-                whereval = []
-                for j in range(0, len(keycols)):
-                    _kcs = keycols[: j + 1]
-                    unit = []
-                    for i, (coln, colt) in enumerate(_kcs):
-                        soy = ">" if i == len(_kcs) - 1 else "="
-                        if "int" in colt or "double" in colt or "char" in colt or "date" == colt or "decimal" == colt:
-                            unit.append(f"`{coln}` {soy} %s")
-                            params.append(_keyval[coln])
-                        else:
-                            raise Exception(f"data type: [{colt}] not suppert yet.")
-                    whereval.append(" and ".join(unit))
-                where = "(" + ") or (".join(whereval) + ")"
-                statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} WHERE {where} ORDER BY {_key_colns} limit {self.limit_size}"
-
-            self.logger.debug(f"threading:[{threading.current_thread().name}] - compare ready - sql: {statement}, params: {params}")
-
-            _has_data = False
-
-            with source_con.cursor(dictionary=True) as cur:
-                if len(params) == 0:
-                    cur.execute(statement)
+        with self.source_conpool.get_connection() as source_con:
+            while True:
+                if _keyval is None:
+                    statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} ORDER BY {_key_colns} limit {self.limit_size}"
                 else:
-                    cur.execute(statement, params=tuple(params.copy()))
-                params.clear()
+                    whereval = []
+                    for j in range(0, len(keycols)):
+                        _kcs = keycols[: j + 1]
+                        unit = []
+                        for i, (coln, colt) in enumerate(_kcs):
+                            soy = ">" if i == len(_kcs) - 1 else "="
+                            if "int" in colt or "double" in colt or "char" in colt or "date" == colt or "decimal" == colt:
+                                unit.append(f"`{coln}` {soy} %s")
+                                params.append(_keyval[coln])
+                            else:
+                                raise Exception(f"data type: [{colt}] not suppert yet.")
+                        whereval.append(" and ".join(unit))
+                    where = "(" + ") or (".join(whereval) + ")"
+                    statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} WHERE {where} ORDER BY {_key_colns} limit {self.limit_size}"
 
-                while True:
-                    rows = cur.fetchmany(size=self.fetch_size)
-                    if rows:
-                        _keyval = rows[-1]
-                        _has_data = True
-                        yield rows
+                self.logger.debug(f"threading:[{threading.current_thread().name}] - compare ready - sql: {statement}, params: {params}")
+
+                _has_data = False
+
+                with source_con.cursor(dictionary=True) as cur:
+                    if len(params) == 0:
+                        cur.execute(statement)
                     else:
-                        break
+                        cur.execute(statement, params=tuple(params.copy()))
+                    params.clear()
 
-            if not _has_data:
-                return
+                    while True:
+                        rows = cur.fetchmany(size=self.fetch_size)
+                        if rows:
+                            _keyval = rows[-1]
+                            _has_data = True
+                            yield rows
+                        else:
+                            break
+
+                if not _has_data:
+                    return
 
     def compare_rows_by_keys(self, batch_id: int, source_key_vals: list[dict]):
         self.logger.debug(f"batch[{batch_id}] - compare start - rows {len(source_key_vals)}.")
@@ -285,28 +291,28 @@ class MysqlTableCompare:
 
         return diff_rows
 
-    def compare_full_table(self, _checkpoint_row: dict):
+    def compare_full_table(self, checkpoint_row):
         _cur_batch_id = 1
         # batch_id, source_key_vals, diff_rows = _tasks.pop(0)
         _result_container: list[tuple[int, list[dict], list[dict]]] = []
 
-        with self.source_conpool.get_connection() as source_con:
-            fulltasks = enumerate(self.get_full_table_keys_order(source_con, self.source_table_keys, _checkpoint_row), start=1)
+        # with self.source_conpool.get_connection() as source_con:
+        fulltasks = enumerate(self.get_full_table_keys_order(self.source_table_keys, checkpoint_row), start=1)
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.parallel) as executor:
-                generator_futures = lambda n: {executor.submit(self.compare_rows_by_keys, *task): task for task in itertools.islice(fulltasks, n)}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.parallel) as executor:
+            generator_futures = lambda n: {executor.submit(self.compare_rows_by_keys, *task): task for task in itertools.islice(fulltasks, n)}
 
-                futures = generator_futures(self.parallel)
+            futures = generator_futures(self.parallel)
 
-                while futures:
-                    done, _ = concurrent.futures.wait(futures.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
+            while futures:
+                done, _ = concurrent.futures.wait(futures.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
 
-                    for fut in done:
-                        _result_container.append([*futures.pop(fut), fut.result()])
+                for fut in done:
+                    _result_container.append([*futures.pop(fut), fut.result()])
 
-                    futures.update(generator_futures(len(done)))
+                futures.update(generator_futures(len(done)))
 
-                    _cur_batch_id = self.processing_result(_cur_batch_id, _result_container)
+                _cur_batch_id = self.processing_result(_cur_batch_id, _result_container)
 
     def run(self) -> None:
         try:
@@ -338,18 +344,14 @@ class MysqlTableCompare:
             self.source_table_rows_number = max(1, get_table_rows_number(source_con, self.src_database, self.src_table))
             self.logger.info(f"source table rows number: {self.source_table_rows_number}.")
 
-        _checkpoint = self.read_checkpoint()
-        _checkpoint_row = None
+        self.logger.info(f"from checkpoint: {self.checkpoint}")
 
-        if _checkpoint:
-            self.logger.info(f"checkpoint: {_checkpoint}")
-            self.processed_rows_number = _checkpoint.processed
-            self.different_rows_number = _checkpoint.different
-            _checkpoint_row = _checkpoint.checkpoint
-
-        self.logger.info(f"from checkpoint: {_checkpoint}")
-
-        self.compare_full_table(_checkpoint_row)  # main
+        for _ in range(5):
+            try:
+                self.compare_full_table(self.checkpoint.row)  # main
+                break
+            except Exception as e:
+                raise Exception(f"compare failed {str(e)}") from e
 
         self.logger.info(
             f"compare completed, processed rows: {self.processed_rows_number}, different: {self.different_rows_number},  elapsed time: {get_elapsed_time(self.start_timestamp, 2)}s."
