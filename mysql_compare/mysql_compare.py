@@ -1,17 +1,17 @@
+import concurrent.futures
 import datetime
 import itertools
 import json
 import logging
 import math
 import os
-import queue
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from decimal import Decimal
 
 from mysql.connector import MySQLConnection, connect
+from mysql.connector.pooling import MySQLConnectionPool
 
 
 @dataclass
@@ -19,6 +19,10 @@ class Checkpoint:
     checkpoint: dict
     processed: int
     different: int
+
+
+# @dataclass
+# class CompareResult:
 
 
 def init_logger(name: str | None = None) -> logging.Logger:
@@ -58,11 +62,7 @@ def get_table_structure(con: MySQLConnection, database: str, table: str) -> list
 
 def get_table_keys(con: MySQLConnection, database: str, table: str) -> list[tuple[str, str]]:
     query_table_keys_statement = """
-        SELECT 
-            tis.index_name, 
-            titc.constraint_type, 
-            tic.column_name, 
-            tic.data_type
+        SELECT tis.index_name, titc.constraint_type, tic.column_name, tic.data_type
         FROM information_schema.table_constraints titc
         JOIN information_schema.statistics tis ON titc.table_schema = tis.table_schema AND titc.table_name = tis.table_name AND titc.constraint_name = tis.index_name
         JOIN information_schema.columns tic ON tis.table_schema = tic.table_schema AND tis.table_name = tic.table_name AND tis.column_name = tic.column_name
@@ -83,7 +83,7 @@ def get_table_keys(con: MySQLConnection, database: str, table: str) -> list[tupl
     return keys
 
 
-def get_table_rows_by_keys(con: MySQLConnection, database: str, table: str, table_keys: list[tuple[str, str]], table_keys_rows: list[dict]) -> list[dict]:
+def get_table_rows_by_keys(con: MySQLConnectionPool, database: str, table: str, table_keys: list[tuple[str, str]], table_keys_rows: list[dict]) -> list[dict]:
     cols = [key[0] for key in table_keys]
     placeholders = ", ".join(["%s"] * len(cols))
 
@@ -94,27 +94,18 @@ def get_table_rows_by_keys(con: MySQLConnection, database: str, table: str, tabl
     formatted_cols = [f"`{c}`" for c in cols]
     _stmt = f"SELECT * FROM {database}.{table} WHERE ({', '.join(formatted_cols)}) IN ({in_clause})"
 
-    with con.cursor(dictionary=True) as cur:
-        cur.execute(_stmt, tuple(params))
-        return cur.fetchall()
+    with con.get_connection() as con:
+        with con.cursor(dictionary=True) as cur:
+            cur.execute(_stmt, tuple(params))
+            return cur.fetchall()
 
 
 def get_elapsed_time(st: float, ndigits=None) -> int | float:
     return round(time.time() - st, ndigits)
 
 
-def recreate_connection(dsn: dict, conn: MySQLConnection | None = None) -> MySQLConnection:
-    if conn:
-        try:
-            conn.close()
-        except:
-            pass
-    for _ in range(5):
-        try:
-            return connect(**dsn, time_zone="+00:00")
-        except Exception:
-            time.sleep(5)
-    raise Exception("Failed to create MySQL connection after 5 attempts.")
+def submit_task(executor, def_compare_rows_by_keys, batch_id, source_key_vals):
+    return executor.submit(def_compare_rows_by_keys, batch_id, source_key_vals), [batch_id, source_key_vals]
 
 
 class MysqlTableCompare:
@@ -135,8 +126,8 @@ class MysqlTableCompare:
 
         self.parallel = parallel
 
-        self.fetch_size = fetch_size
-        self.shard_size = shard_size
+        self.limit_size = fetch_size
+        self.fetch_size = shard_size
 
         self.src_database = src_database
         self.src_table = src_table
@@ -158,181 +149,43 @@ class MysqlTableCompare:
         self.done_file = f"{self.compare_name}.done"
         self.different_file = f"{self.compare_name}.diff.log"
 
-        if self.fetch_size % self.shard_size != 0:
+        if self.limit_size % self.fetch_size != 0:
             raise Exception(f"The remainder of the fetch_size divided by the shard_size must be equal to 0.")
 
-    def result_worker(self, task_result_queue: queue.Queue):
-        _thread_ident = threading.current_thread().name
-        _batch_id = 0
-        _tasks: list[tuple[int, list[dict], list[dict]]] = []
+        self.logger = init_logger(self.compare_name)
 
-        while True:
-            _task = task_result_queue.get()
+        self.logger.info(f"source table connect pool create.")
+        self.source_conpool = MySQLConnectionPool(pool_name="source_conpool", pool_size=math.ceil(self.parallel * 1.2) + 4, **self.source_dsn)
 
-            if _task is None:
-                task_result_queue.task_done()
-                break
+        self.logger.info(f"target table connect pool create.")
+        self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=math.ceil(self.parallel * 1.2), **self.target_dsn)
 
-            _tasks.append(_task)
-            _tasks.sort(key=lambda x: x[0])
+    # batch_id, source_key_vals, diff_rows
+    def processing_result(self, cur_batch_id, _tasks: list[tuple[int, list[dict], list[dict]]]):
+        _batch_id = cur_batch_id
 
-            while _tasks and _tasks[0][0] == _batch_id:
-                batch_id, source_key_vals, diff_rows = _tasks.pop(0)
+        _tasks.sort(key=lambda x: x[0])
 
-                self.processed_rows_number += len(source_key_vals)
+        while _tasks and _tasks[0][0] == _batch_id:
+            batch_id, source_key_vals, diff_rows = _tasks.pop(0)
+            self.processed_rows_number += len(source_key_vals)
 
-                if diff_rows:
-                    self.write_diff_rows(diff_rows)
-                    self.different_rows_number += len(diff_rows)
+            if diff_rows:
+                self.write_diff_rows(diff_rows)
+                self.different_rows_number += len(diff_rows)
 
-                if self.processed_rows_number % 10000 == 0:
-                    self.write_checkpoint(source_key_vals[-1], self.processed_rows_number, self.different_rows_number)
-                    self.logger.debug(f"checkpoint: {source_key_vals[-1]}")
+            if self.processed_rows_number % 10000 == 0:
+                self.write_checkpoint(source_key_vals[-1], self.processed_rows_number, self.different_rows_number)
+                self.logger.debug(f"checkpoint: {source_key_vals[-1]}")
 
-                _progress_rate = round(self.processed_rows_number / max(1, self.source_table_rows_number) * 100, 1)
-                self.logger.debug(f"threading[{_thread_ident}], batch[{batch_id}] - progress: {_progress_rate}%, total rows: {self.source_table_rows_number}.")
-                self.logger.debug(f"threading[{_thread_ident}], batch[{batch_id}] - different: {self.different_rows_number}.")
+            _progress_rate = round(self.processed_rows_number / max(1, self.source_table_rows_number) * 100, 1)
+            self.logger.debug(
+                f"batch[{batch_id}] - compare progress - {_progress_rate}%, different: {self.different_rows_number}, total rows: {self.source_table_rows_number}."
+            )
 
-                _batch_id += 1
+            _batch_id += 1
 
-                task_result_queue.task_done()
-
-    def worker(
-        self,
-        task_queue: queue.Queue,
-        task_result_queue: queue.Queue,
-        task_error_event: threading.Event,
-        task_error_queue: queue.Queue,
-    ):
-        _thread_ident = threading.current_thread().name
-        _src_conn = recreate_connection(self.source_dsn)
-        _dst_conn = recreate_connection(self.target_dsn)
-        _err_try = 10
-
-        while not task_error_event.is_set():
-            task: tuple[int, list[dict]] = task_queue.get()
-
-            if task is None:
-                task_queue.task_done()
-                break
-
-            batch_id, source_key_vals = task
-
-            if source_key_vals:
-                for try_cnt in range(1, _err_try + 1):
-                    try:
-                        diff_rows = self.process_rows(batch_id, _src_conn, _dst_conn, source_key_vals)
-                        task_result_queue.put((batch_id, source_key_vals, diff_rows))
-                        break
-                    except Exception as e:
-                        self.logger.error(f"threading:[{_thread_ident}], batch[{batch_id}] - {str(e)}.")
-                        self.logger.error(f"threading:[{_thread_ident}], batch[{batch_id}] - retry: {try_cnt}/{_err_try}")
-
-                        if try_cnt == _err_try:
-                            task_error_event.set()
-                            task_error_queue.put(e)
-                            self.logger.error(f"threading:[{_thread_ident}], batch[{batch_id}] - exit.")
-                        else:
-                            time.sleep(1)
-                            try:
-                                _src_conn = recreate_connection(self.source_dsn, _src_conn)
-                                _dst_conn = recreate_connection(self.target_dsn, _dst_conn)
-                            except Exception as ce:
-                                self.logger.error(f"threading:[{_thread_ident}], batch[{batch_id}] - {str(ce)}.")
-
-            task_queue.task_done()
-
-        for c in [_src_conn, _dst_conn]:
-            try:
-                c.close()
-            except Exception:
-                pass
-
-    def get_full_table_orderby_keys(self, source_con: MySQLConnection, limit_size: int, keycols: list[tuple[str, str]], keyval: dict = None):
-        _keyval = keyval
-        # select * from where 1 = 1 and ((a > xxx) or (a = xxx and b > yyy) or (a = xxx and b = yyy and c > zzz)) order by a,b,c limit checksize
-        params: list = []
-        _key_colns = ", ".join([f"`{col[0]}`" for col in keycols])
-
-        while True:
-            if _keyval is None:
-                statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} ORDER BY {_key_colns} limit {limit_size}"
-            else:
-                whereval = []
-                for j in range(0, len(keycols)):
-                    _kcs = keycols[: j + 1]
-                    unit = []
-                    for i, (coln, colt) in enumerate(_kcs):
-                        soy = ">" if i == len(_kcs) - 1 else "="
-                        if "int" in colt or "double" in colt or "char" in colt or "date" == colt or "decimal" == colt:
-                            unit.append(f"`{coln}` {soy} %s")
-                            params.append(_keyval[coln])
-                        else:
-                            raise Exception(f"data type: [{colt}] not suppert yet.")
-                    whereval.append(" and ".join(unit))
-                where = "(" + ") or (".join(whereval) + ")"
-                statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} WHERE {where} ORDER BY {_key_colns} limit {limit_size}"
-
-            self.logger.debug(f"threading:[{threading.current_thread().name}] - get_full_table_orderby_keys: {statement}, params {params}")
-
-            _has_data = False
-
-            with source_con.cursor(dictionary=True) as cur:
-                if len(params) == 0:
-                    cur.execute(statement)
-                else:
-                    cur.execute(statement, params=tuple(params.copy()))
-
-                params.clear()
-
-                while True:
-                    rows = cur.fetchmany(size=self.shard_size)
-
-                    if rows:
-                        _keyval = rows[-1]
-                        _has_data = True
-                        yield rows
-                    else:
-                        break
-
-            if not _has_data:
-                return
-
-    def process_rows(
-        self,
-        batch_id: int,
-        source_con: MySQLConnection,
-        target_con: MySQLConnection,
-        source_key_vals: list[dict],
-    ):
-        _thread_ident = threading.current_thread().name
-
-        self.logger.debug(f"threading:[{_thread_ident}], batch[{batch_id}] - start compare rows {len(source_key_vals)}.")
-
-        tasks = {
-            "source": (source_con, self.src_database, self.src_table, self.source_table_keys, source_key_vals),
-            "target": (target_con, self.dst_database, self.dst_table, self.source_table_keys, source_key_vals),
-        }
-
-        fetch_rows = lambda db_con, db_name, table_name, table_keys, key_vals: get_table_rows_by_keys(db_con, db_name, table_name, table_keys, key_vals)
-
-        _s_ts = time.time()
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_to_task = {executor.submit(fetch_rows, *tasks[task]): task for task in tasks}
-            tasks = {key: [] for key in tasks}
-            for future in as_completed(future_to_task):
-                task = future_to_task[future]
-                try:
-                    tasks[task] = future.result()
-                except Exception as e:
-                    raise Exception(f"task[{task}] - fetch rows error: {str(e)}") from e
-
-        self.logger.debug(
-            f"threading:[{_thread_ident}], batch[{batch_id}] - compare rows elapsed time {get_elapsed_time(_s_ts,2)}s, count: {len(tasks[task])}."
-        )
-
-        return list(itertools.filterfalse(lambda x: x in tasks["target"], tasks["source"]))
+        return _batch_id
 
     def write_diff_rows(self, rows: list[dict]):
         with open(self.different_file, "a", encoding="utf8") as f:
@@ -358,16 +211,129 @@ class MysqlTableCompare:
                     ckpt.checkpoint[coln] = Decimal(ckpt.checkpoint[coln])
         return ckpt
 
-    def run(self) -> None:
-        self.logger = init_logger(self.compare_name)
+    def get_full_table_keys_order(
+        self,
+        source_con: MySQLConnection,
+        keycols: list[tuple[str, str]],
+        ckpt_row: dict = None,
+    ):
+        _keyval = ckpt_row
+        # select * from where 1 = 1 and ((a > xxx) or (a = xxx and b > yyy) or (a = xxx and b = yyy and c > zzz)) order by a,b,c limit checksize
+        params: list = []
+        _key_colns = ", ".join([f"`{col[0]}`" for col in keycols])
 
+        while True:
+            if _keyval is None:
+                statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} ORDER BY {_key_colns} limit {self.limit_size}"
+            else:
+                whereval = []
+                for j in range(0, len(keycols)):
+                    _kcs = keycols[: j + 1]
+                    unit = []
+                    for i, (coln, colt) in enumerate(_kcs):
+                        soy = ">" if i == len(_kcs) - 1 else "="
+                        if "int" in colt or "double" in colt or "char" in colt or "date" == colt or "decimal" == colt:
+                            unit.append(f"`{coln}` {soy} %s")
+                            params.append(_keyval[coln])
+                        else:
+                            raise Exception(f"data type: [{colt}] not suppert yet.")
+                    whereval.append(" and ".join(unit))
+                where = "(" + ") or (".join(whereval) + ")"
+                statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} WHERE {where} ORDER BY {_key_colns} limit {self.limit_size}"
+
+            self.logger.debug(f"threading:[{threading.current_thread().name}] - get_full_table_orderby_keys: {statement}, params {params}")
+
+            _has_data = False
+
+            with source_con.cursor(dictionary=True) as cur:
+                if len(params) == 0:
+                    cur.execute(statement)
+                else:
+                    cur.execute(statement, params=tuple(params.copy()))
+                params.clear()
+
+                while True:
+                    rows = cur.fetchmany(size=self.fetch_size)
+                    if rows:
+                        _keyval = rows[-1]
+                        _has_data = True
+                        yield rows
+                    else:
+                        break
+
+            if not _has_data:
+                return
+
+    def compare_rows_by_keys(
+        self,
+        batch_id: int,
+        source_key_vals: list[dict],
+    ):
+        self.logger.debug(f"batch[{batch_id}] - compare start - rows {len(source_key_vals)}.")
+
+        tasks = {
+            "source": (self.source_conpool, self.src_database, self.src_table, self.source_table_keys, source_key_vals),
+            "target": (self.target_conpool, self.dst_database, self.dst_table, self.source_table_keys, source_key_vals),
+        }
+
+        fetch_rows = lambda db_conpool, db_name, table_name, table_keys, key_vals: get_table_rows_by_keys(db_conpool, db_name, table_name, table_keys, key_vals)
+
+        _s_ts = time.time()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {executor.submit(fetch_rows, *tasks[task]): task for task in tasks}
+
+            tasks = {key: [] for key in tasks}
+
+            for future in concurrent.futures.as_completed(futures):
+                task = futures[future]
+                try:
+                    tasks[task] = future.result()
+                except Exception as e:
+                    raise Exception(f"task[{task}] - fetch rows error: {str(e)}") from e
+
+        diff_rows = list(itertools.filterfalse(lambda x: x in tasks["target"], tasks["source"]))
+
+        self.logger.debug(
+            f"batch[{batch_id}] - compare success - elapsed time {get_elapsed_time(_s_ts,2)}s, rows: {len(tasks[task])}, different: {len(diff_rows)}."
+        )
+
+        return diff_rows
+
+    def compare_full_table(self, _checkpoint_row: dict):
+        _cur_batch_id = 1
+        # batch_id, source_key_vals, diff_rows = _tasks.pop(0)
+        _result_container: list[tuple[int, int, list[dict]]] = []
+
+        with self.source_conpool.get_connection() as source_con:
+            fulltasks = enumerate(self.get_full_table_keys_order(source_con, self.source_table_keys, _checkpoint_row), start=1)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.parallel) as executor:
+                generator_futures = lambda n: {
+                    executor.submit(self.compare_rows_by_keys, batch_id, source_key_vals): (batch_id, source_key_vals)
+                    for batch_id, source_key_vals in itertools.islice(fulltasks, n)
+                }
+
+                futures = generator_futures(self.parallel)
+
+                while futures:
+                    done, _ = concurrent.futures.wait(futures.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
+
+                    for fut in done:
+                        batch_id, source_key_vals = futures.pop(fut)
+                        diff_rows = fut.result()
+                        _result_container.append([batch_id, source_key_vals, diff_rows])
+
+                    futures.update(generator_futures(len(done)))
+
+                    _cur_batch_id = self.processing_result(_cur_batch_id, _result_container)
+
+    def run(self) -> None:
         if os.path.exists(self.done_file):
             return
 
-        self.logger.info(f"start {self.compare_name}.")
-
         try:
-            with recreate_connection(self.source_dsn) as source_con, recreate_connection(self.target_dsn) as target_con:
+            with self.source_conpool.get_connection() as source_con, self.target_conpool.get_connection() as target_con:
                 source_table_struct: list[tuple[str, str]] = get_table_structure(source_con, self.src_database, self.src_table)
                 target_table_struct: list[tuple[str, str]] = get_table_structure(target_con, self.dst_database, self.dst_table)
 
@@ -401,70 +367,10 @@ class MysqlTableCompare:
 
         self.logger.info(f"from checkpoint: {_checkpoint}")
 
-        _worker_threads: list[threading.Thread] = []
-
-        _task_queue_length = math.ceil(self.parallel * 1.2)
-        _task_queue = queue.Queue(maxsize=_task_queue_length)
-        _task_result_queue = queue.Queue(maxsize=self.parallel)
-        _task_error_queue = queue.Queue()
-        _task_error_thread_event = threading.Event()
-
-        for _ in range(_task_queue_length):
-            t = threading.Thread(
-                target=self.worker,
-                args=(
-                    _task_queue,
-                    _task_result_queue,
-                    _task_error_thread_event,
-                    _task_error_queue,
-                ),
-            )
-            t.start()
-            self.logger.debug(f"start worker thread {t.name}")
-            _worker_threads.append(t)
-
-        _worker_result_thread = threading.Thread(target=self.result_worker, args=(_task_result_queue,))
-        _worker_result_thread.start()
-        self.logger.debug(f"start worker result thread {_worker_result_thread.name}")
-
-        _batch_id = 0
-        _debug_fetch_rows = 0
         try:
-            with recreate_connection(self.source_dsn) as scon:
-                for rows in self.get_full_table_orderby_keys(
-                    scon,
-                    self.fetch_size,
-                    self.source_table_keys,
-                    _checkpoint_row,
-                ):
-                    _debug_fetch_rows += len(rows)
-                    _task_queue.put([_batch_id, rows])
-                    _batch_id += 1
+            self.compare_full_table(_checkpoint_row)
         except Exception as e:
-            self.logger.error(f"query table faile {str(e)}")
-
-        for _ in range(_task_queue_length):
-            _task_queue.put(None)
-        self.logger.debug(f"queue:[task_queue] {_task_queue_length} - try close.")
-
-        _task_queue.join()
-        self.logger.debug(f"queue:[task_queue] - release.")
-
-        for t in _worker_threads:
-            t.join()
-            self.logger.debug(f"threading:[worker][{t.name}] - release.")
-
-        _task_result_queue.put(None)
-        self.logger.debug(f"queue:[task_result_queue] - try close.")
-        _task_result_queue.join()
-        self.logger.debug(f"queue:[task_result_queue] - release.")
-
-        _worker_result_thread.join()
-        self.logger.debug(f"threading:[worker_result][{_worker_result_thread.name}] - release.")
-
-        if not _task_error_queue.empty():
-            err = _task_error_queue.get()
-            self.logger.error(f"compare failed, {str(err)}.")
+            self.logger.error(f"compare full table: {str(e)}")
             return
 
         self.logger.info(f"compare completed, processed rows: {self.processed_rows_number} elapsed time: {get_elapsed_time(self.start_timestamp, 2)}s.")
@@ -477,10 +383,11 @@ class MysqlTableCompare:
 
 if __name__ == "__main__":
     MysqlTableCompare(
-        {"host": "192.168.161.2", "port": 3306, "user": "dtle_sync", "password": "dtle_sync"},
-        {"host": "192.168.161.93", "port": 3306, "user": "dtle_sync", "password": "dtle_sync"},
+        {"host": "192.168.161.2", "port": 3306, "user": "dtle_sync", "password": "dtle_sync", "time_zone": "+00:00"},
+        {"host": "192.168.161.93", "port": 3306, "user": "dtle_sync", "password": "dtle_sync", "time_zone": "+00:00"},
         "merchant_center_vela_v1",
         "mc_products_to_tags",
         "merchant_center_vela_v1",
         "mc_products_to_tags",
+        10,
     ).run()
