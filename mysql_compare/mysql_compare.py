@@ -10,7 +10,7 @@ import time
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 
-from mysql.connector import MySQLConnection, connect
+from mysql.connector import MySQLConnection
 from mysql.connector.pooling import MySQLConnectionPool
 
 
@@ -211,14 +211,14 @@ class MysqlTableCompare:
     def get_full_table_keys_order(self, keycols: list[tuple[str, str]], ckpt_row: dict = None):
         _keyval = ckpt_row
         # select * from where 1 = 1 and ((a > xxx) or (a = xxx and b > yyy) or (a = xxx and b = yyy and c > zzz)) order by a,b,c limit checksize
-        params: list = []
         _key_colns = ", ".join([f"`{col[0]}`" for col in keycols])
 
         with self.source_conpool.get_connection() as source_con:
             while True:
-                if _keyval is None:
-                    statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} ORDER BY {_key_colns} limit {self.limit_size}"
-                else:
+                params: list = []
+                where_clause = ""
+
+                if _keyval:
                     whereval = []
                     for j in range(0, len(keycols)):
                         _kcs = keycols[: j + 1]
@@ -231,19 +231,16 @@ class MysqlTableCompare:
                             else:
                                 raise Exception(f"data type: [{colt}] not suppert yet.")
                         whereval.append(" and ".join(unit))
-                    where = "(" + ") or (".join(whereval) + ")"
-                    statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} WHERE {where} ORDER BY {_key_colns} limit {self.limit_size}"
+                    where_clause = "WHERE" + "(" + ") or (".join(whereval) + ")"
+
+                statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} {where_clause} ORDER BY {_key_colns} LIMIT {self.limit_size}"
 
                 self.logger.debug(f"threading:[{threading.current_thread().name}] - compare ready - sql: {statement}, params: {params}")
 
                 _has_data = False
 
                 with source_con.cursor(dictionary=True) as cur:
-                    if len(params) == 0:
-                        cur.execute(statement)
-                    else:
-                        cur.execute(statement, params=tuple(params.copy()))
-                    params.clear()
+                    cur.execute(statement, params=params)
 
                     while True:
                         rows = cur.fetchmany(size=self.fetch_size)
@@ -296,7 +293,6 @@ class MysqlTableCompare:
         # batch_id, source_key_vals, diff_rows = _tasks.pop(0)
         _result_container: list[tuple[int, list[dict], list[dict]]] = []
 
-        # with self.source_conpool.get_connection() as source_con:
         fulltasks = enumerate(self.get_full_table_keys_order(self.source_table_keys, checkpoint_row), start=1)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.parallel) as executor:
@@ -346,12 +342,14 @@ class MysqlTableCompare:
 
         self.logger.info(f"from checkpoint: {self.checkpoint}")
 
-        for _ in range(5):
+        for i in range(5):
             try:
                 self.compare_full_table(self.checkpoint.row)  # main
                 break
             except Exception as e:
-                raise Exception(f"compare failed {str(e)}") from e
+                self.logger.error(f"compare failed {str(e)}.")
+                if i == 4:
+                    raise Exception(f"compare failed {str(e)}.") from e
 
         self.logger.info(
             f"compare completed, processed rows: {self.processed_rows_number}, different: {self.different_rows_number},  elapsed time: {get_elapsed_time(self.start_timestamp, 2)}s."
