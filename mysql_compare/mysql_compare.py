@@ -132,11 +132,6 @@ class MysqlTableCompare:
         self.logger.info(f"target table connect pool create.")
         self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=math.ceil(self.parallel * 1.2), **self.target_dsn)
 
-        self.checkpoint = self.read_checkpoint()
-
-        self.processed_rows_number = self.checkpoint.processed
-        self.different_rows_number = self.checkpoint.different
-
     # batch_id, source_key_vals, diff_rows
     def processing_result(self, cur_batch_id, _tasks: list[tuple[int, list[dict], list[dict]]]):
         _batch_id = cur_batch_id
@@ -159,7 +154,7 @@ class MysqlTableCompare:
                 self.write_checkpoint()
                 self.logger.info(f"checkpoint: {self.checkpoint}")
 
-            _progress_rate = round(self.processed_rows_number / max(1, self.source_table_rows_number) * 100, 1)
+            _progress_rate = round(self.processed_rows_number / self.source_table_rows_number * 100, 1)
             self.logger.debug(
                 f"batch[{batch_id}] - compare progress - {_progress_rate}%, different: {self.different_rows_number}, total rows: {self.source_table_rows_number}."
             )
@@ -219,21 +214,21 @@ class MysqlTableCompare:
                 where_clause = ""
 
                 if _keyval:
-                    whereval = []
-                    for j in range(0, len(keycols)):
-                        _kcs = keycols[: j + 1]
-                        unit = []
-                        for i, (coln, colt) in enumerate(_kcs):
-                            soy = ">" if i == len(_kcs) - 1 else "="
-                            if "int" in colt or "double" in colt or "char" in colt or "date" == colt or "decimal" == colt:
-                                unit.append(f"`{coln}` {soy} %s")
-                                params.append(_keyval[coln])
+                    where_conditions = []
+                    for end_idx in range(len(keycols)):
+                        condition_parts = []
+                        for i, (column_name, column_type) in enumerate(keycols[: end_idx + 1]):
+                            operator = ">" if i == end_idx else "="
+                            if column_type in ["int", "double", "char", "date", "decimal"]:
+                                condition_parts.append(f"`{column_name}` {operator} %s")
+                                params.append(_keyval[column_name])
                             else:
-                                raise Exception(f"data type: [{colt}] not suppert yet.")
-                        whereval.append(" and ".join(unit))
-                    where_clause = "WHERE" + "(" + ") or (".join(whereval) + ")"
+                                raise ValueError(f"Data type: [{column_type}] is not supported yet.")
 
-                statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} {where_clause} ORDER BY {_key_colns} LIMIT {self.limit_size}"
+                        where_conditions.append(" and ".join(condition_parts))
+                    where_clause = "WHERE" + "(" + ") or (".join(where_conditions) + ") "
+
+                statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} {where_clause}ORDER BY {_key_colns} LIMIT {self.limit_size}"
 
                 self.logger.debug(f"threading:[{threading.current_thread().name}] - compare ready - sql: {statement}, params: {params}")
 
@@ -262,13 +257,11 @@ class MysqlTableCompare:
             "target": (self.target_conpool, self.dst_database, self.dst_table, source_key_vals),
         }
 
-        fetch_rows = lambda db_conpool, database, table, key_vals: self.get_table_rows_by_keys(db_conpool, database, table, key_vals)
-
         _s_ts = time.time()
 
         def execute_tasks(retry_count=5):
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                futures = {executor.submit(fetch_rows, *tasks[task]): task for task in tasks}
+                futures = {executor.submit(self.get_table_rows_by_keys, *tasks[task]): task for task in tasks}
                 try:
                     return {task: future.result() for future, task in futures.items()}
                 except Exception as e:
@@ -314,7 +307,7 @@ class MysqlTableCompare:
         try:
             self._run()
         except Exception as e:
-            self.logger.error(str(e))
+            self.logger.error(f"compare master - {str(e)}")
 
     def _run(self) -> None:
         if os.path.exists(self.done_file):
@@ -340,6 +333,10 @@ class MysqlTableCompare:
             self.source_table_rows_number = max(1, get_table_rows_number(source_con, self.src_database, self.src_table))
             self.logger.info(f"source table rows number: {self.source_table_rows_number}.")
 
+        self.checkpoint = self.read_checkpoint()
+        self.processed_rows_number = self.checkpoint.processed
+        self.different_rows_number = self.checkpoint.different
+
         self.logger.info(f"from checkpoint: {self.checkpoint}")
 
         for i in range(5):
@@ -347,9 +344,8 @@ class MysqlTableCompare:
                 self.compare_full_table(self.checkpoint.row)  # main
                 break
             except Exception as e:
-                self.logger.error(f"compare failed {str(e)}.")
                 if i == 4:
-                    raise Exception(f"compare failed {str(e)}.") from e
+                    raise Exception(f"compare full table {str(e)}.") from e
 
         self.logger.info(
             f"compare completed, processed rows: {self.processed_rows_number}, different: {self.different_rows_number},  elapsed time: {get_elapsed_time(self.start_timestamp, 2)}s."
