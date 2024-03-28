@@ -203,6 +203,12 @@ class MysqlTableCompare:
         # select * from where 1 = 1 and ((a > xxx) or (a = xxx and b > yyy) or (a = xxx and b = yyy and c > zzz)) order by a,b,c limit checksize
         _key_colns = ", ".join([f"`{col[0]}`" for col in keycols])
 
+        for _, column_type in keycols:
+            if column_type in ["int", "double", "char", "date", "decimal", "varchar", "bigint", "tinyint"]:
+                pass
+            else:
+                raise ValueError(f"Data type: [{column_type}] is not supported yet.")
+
         with self.source_conpool.get_connection() as source_con:
             while True:
                 params: list = []
@@ -214,11 +220,8 @@ class MysqlTableCompare:
                         condition_parts = []
                         for i, (column_name, column_type) in enumerate(keycols[: end_idx + 1]):
                             operator = ">" if i == end_idx else "="
-                            if column_type in ["int", "double", "char", "date", "decimal", "varchar"]:
-                                condition_parts.append(f"`{column_name}` {operator} %s")
-                                params.append(_keyval[column_name])
-                            else:
-                                raise ValueError(f"Data type: [{column_type}] is not supported yet.")
+                            condition_parts.append(f"`{column_name}` {operator} %s")
+                            params.append(_keyval[column_name])
 
                         where_conditions.append(" and ".join(condition_parts))
                     where_clause = "WHERE" + "(" + ") or (".join(where_conditions) + ") "
