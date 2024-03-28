@@ -134,7 +134,7 @@ class MysqlTableCompare:
         cts.sort(key=lambda task: task.batch_id)
 
         while cts and cts[0].batch_id == batch_id:
-            batch_id, source_key_vals, diff_rows = astuple(cts.pop(0))
+            _, source_key_vals, diff_rows = astuple(cts.pop(0))
 
             self.processed_rows_number += len(source_key_vals)
 
@@ -151,7 +151,7 @@ class MysqlTableCompare:
 
             _progress_rate = round(self.processed_rows_number / self.source_table_rows_number * 100, 1)
             self.logger.debug(
-                f"compare progress - batch[{batch_id}] - {_progress_rate}%, different: {self.different_rows_number}, total rows: {self.source_table_rows_number}."
+                f"compare progress - pending:{len(cts)}, progress:{_progress_rate}%, different: {self.different_rows_number}, total rows: {self.source_table_rows_number}."
             )
 
             batch_id += 1
@@ -214,7 +214,7 @@ class MysqlTableCompare:
                         condition_parts = []
                         for i, (column_name, column_type) in enumerate(keycols[: end_idx + 1]):
                             operator = ">" if i == end_idx else "="
-                            if column_type in ["int", "double", "char", "date", "decimal"]:
+                            if column_type in ["int", "double", "char", "date", "decimal", "varchar"]:
                                 condition_parts.append(f"`{column_name}` {operator} %s")
                                 params.append(_keyval[column_name])
                             else:
@@ -303,7 +303,6 @@ class MysqlTableCompare:
 
     def run(self) -> None:
         if os.path.exists(self.done_file):
-            self.logger.info(f"compare done file exist.")
             return
 
         self.logger = init_logger(self.compare_name)
