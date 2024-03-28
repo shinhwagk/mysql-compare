@@ -34,7 +34,6 @@ def init_logger(name: str | None = None) -> logging.Logger:
 
     log_file_configs = [
         {"filename": f"{name}.log", "level": logging.DEBUG},
-        {"filename": f"{name}.err.log", "level": logging.ERROR},
     ]
 
     for config in log_file_configs:
@@ -353,13 +352,13 @@ class MysqlTableCompare:
             os.remove(self.checkpoint_file)
 
 
-if __name__ == "__main__":
-    MysqlTableCompare(
-        {"host": "192.168.161.2", "port": 3306, "user": "dtle_sync", "password": "dtle_sync", "time_zone": "+00:00"},
-        {"host": "192.168.161.93", "port": 3306, "user": "dtle_sync", "password": "dtle_sync", "time_zone": "+00:00"},
-        "merchant_center_vela_v1",
-        "mc_products_to_tags",
-        "merchant_center_vela_v1",
-        "mc_products_to_tags",
-        10,
-    ).run()
+# if __name__ == "__main__":
+#     MysqlTableCompare(
+#         {"host": "192.168.161.2", "port": 3306, "user": "dtle_sync", "password": "dtle_sync", "time_zone": "+00:00"},
+#         {"host": "192.168.161.93", "port": 3306, "user": "dtle_sync", "password": "dtle_sync", "time_zone": "+00:00"},
+#         "merchant_center_vela_v1",
+#         "mc_products_to_tags",
+#         "merchant_center_vela_v1",
+#         "mc_products_to_tags",
+#         10,
+#     ).run()
