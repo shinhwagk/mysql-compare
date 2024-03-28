@@ -285,7 +285,7 @@ class MysqlTableCompare:
 
             def generator_futures(n):
                 try:
-                    return {executor.submit(self.compare_rows_by_keys, *task): task for task in itertools.islice(fulltasks, n)}
+                    return {executor.submit(self.compare_rows_by_keys, *args): args for args in itertools.islice(fulltasks, n)}
                 except Exception as e:
                     raise Exception(f"full table query failure - error: {e}.")
 
