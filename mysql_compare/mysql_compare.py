@@ -93,16 +93,16 @@ class MysqlTableCompare:
         dst_database: str,
         dst_table: str,
         parallel: int = 1,
-        fetch_size: int = 2000,
-        shard_size: int = 200,
+        limit_size: int = 2000,
+        fetch_size: int = 200,
     ) -> None:
         self.source_dsn = src_dsn
         self.target_dsn = dst_dsn
 
         self.parallel = parallel
 
-        self.limit_size = fetch_size
-        self.fetch_size = shard_size
+        self.limit_size = limit_size
+        self.fetch_size = fetch_size
 
         self.src_database = src_database
         self.src_table = src_table
@@ -127,23 +127,22 @@ class MysqlTableCompare:
         self.logger = init_logger(self.compare_name)
 
         self.logger.info(f"source table connect pool create.")
-        self.source_conpool = MySQLConnectionPool(pool_name="source_conpool", pool_size=math.ceil(self.parallel * 1.2) + 4, **self.source_dsn)
+        self.source_conpool = MySQLConnectionPool(pool_name="source_conpool", pool_size=self.parallel + 2 + 2, **self.source_dsn)
 
         self.logger.info(f"target table connect pool create.")
-        self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=math.ceil(self.parallel * 1.2), **self.target_dsn)
+        self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=self.parallel + 2, **self.target_dsn)
 
     # batch_id, source_key_vals, diff_rows
-    def processing_result(self, cur_batch_id, _tasks: list[tuple[int, list[dict], list[dict]]]):
-
+    def processing_result(self, batch_id: int, _tasks: list[tuple[int, list[dict], list[dict]]]):
         _tasks.sort(key=lambda x: x[0])
 
-        while _tasks and _tasks[0][0] == cur_batch_id:
+        while _tasks and _tasks[0][0] == batch_id:
             batch_id, source_key_vals, diff_rows = _tasks.pop(0)
 
             self.processed_rows_number += len(source_key_vals)
 
             if diff_rows:
-                self.write_different_rows(diff_rows)
+                self.write_different(diff_rows)
                 self.different_rows_number += len(diff_rows)
 
             if self.processed_rows_number % 10000 == 0 or diff_rows:
@@ -158,11 +157,11 @@ class MysqlTableCompare:
                 f"batch[{batch_id}] - compare progress - {_progress_rate}%, different: {self.different_rows_number}, total rows: {self.source_table_rows_number}."
             )
 
-            cur_batch_id += 1
+            batch_id += 1
 
-        return cur_batch_id
+        return batch_id
 
-    def write_different_rows(self, rows: list[dict]):
+    def write_different(self, rows: list[dict]):
         with open(self.different_file, "a", encoding="utf8") as f:
             for row in rows:
                 f.write(f"{row}\n")
@@ -186,7 +185,7 @@ class MysqlTableCompare:
                     ckpt.row[coln] = Decimal(ckpt.row[coln])
         return ckpt
 
-    def get_table_rows_by_keys(self, con: MySQLConnectionPool, database, table, table_keys_rows: list[dict]) -> list[dict]:
+    def get_table_rows_by_keys(self, con: MySQLConnectionPool, database: str, table: str, table_keys_rows: list[dict]) -> list[dict]:
         cols = [key[0] for key in self.source_table_keys]
         placeholders = ", ".join(["%s"] * len(cols))
 
@@ -251,31 +250,26 @@ class MysqlTableCompare:
     def compare_rows_by_keys(self, batch_id: int, source_key_vals: list[dict]):
         self.logger.debug(f"batch[{batch_id}] - compare start - rows {len(source_key_vals)}.")
 
-        tasks = {
+        _task_configs = {
             "source": (self.source_conpool, self.src_database, self.src_table, source_key_vals),
             "target": (self.target_conpool, self.dst_database, self.dst_table, source_key_vals),
         }
 
-        _s_ts = time.time()
+        _tasks_results = {"source": [], "target": []}
 
-        def execute_tasks(retry_count=5):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                futures = {executor.submit(self.get_table_rows_by_keys, *tasks[task]): task for task in tasks}
-                try:
-                    return {task: future.result() for future, task in futures.items()}
-                except Exception as e:
-                    self.logger.error(f"batch[{batch_id}] - compare success - try: {5 - retry_count}/5, error: {str(e)}  .")
-                    if retry_count > 1:
-                        return execute_tasks(retry_count - 1)
-                    else:
-                        raise e
+        _start_time = time.time()
 
-        tasks_result = execute_tasks()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {executor.submit(self.get_table_rows_by_keys, *args): name for name, args in _task_configs.items()}
+            try:
+                _tasks_results = {name: future.result() for future, name in futures.items()}
+            except Exception as e:
+                raise Exception(f"compare rows failure - batch[{batch_id}] - error: {e}.")
 
-        diff_rows = list(itertools.filterfalse(lambda x: x in tasks_result["target"], tasks_result["source"]))
+        diff_rows = list(itertools.filterfalse(lambda x: x in _tasks_results["target"], _tasks_results["source"]))
 
         self.logger.debug(
-            f"batch[{batch_id}] - compare success - elapsed time {get_elapsed_time(_s_ts,2)}s, rows: {len(tasks_result['source'])}, different: {len(diff_rows)}."
+            f"compare rows success - batch[{batch_id}] - elapsed time {get_elapsed_time(_start_time,2)}s, rows: {len(_tasks_results['source'])}, different: {len(diff_rows)}."
         )
 
         return diff_rows
@@ -288,7 +282,12 @@ class MysqlTableCompare:
         fulltasks = enumerate(self.get_full_table_keys_order(self.source_table_keys, checkpoint_row), start=1)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.parallel) as executor:
-            generator_futures = lambda n: {executor.submit(self.compare_rows_by_keys, *task): task for task in itertools.islice(fulltasks, n)}
+
+            def generator_futures(n):
+                try:
+                    return {executor.submit(self.compare_rows_by_keys, *task): task for task in itertools.islice(fulltasks, n)}
+                except Exception as e:
+                    raise Exception(f"full table query failure - error: {e}.")
 
             futures = generator_futures(self.parallel)
 
@@ -306,7 +305,8 @@ class MysqlTableCompare:
         try:
             self._run()
         except Exception as e:
-            self.logger.error(f"compare master - {str(e)}")
+            self.logger.error(e)
+            raise e
 
     def _run(self) -> None:
         if os.path.exists(self.done_file):
@@ -338,13 +338,7 @@ class MysqlTableCompare:
 
         self.logger.info(f"from checkpoint: {self.checkpoint}")
 
-        for i in range(5):
-            try:
-                self.compare_full_table(self.checkpoint.row)  # main
-                break
-            except Exception as e:
-                if i == 4:
-                    raise Exception(f"compare full table {str(e)}.") from e
+        self.compare_full_table(self.checkpoint.row)  # main
 
         self.logger.info(
             f"compare completed, processed rows: {self.processed_rows_number}, different: {self.different_rows_number},  elapsed time: {get_elapsed_time(self.start_timestamp, 2)}s."
