@@ -134,11 +134,10 @@ class MysqlTableCompare:
 
     # batch_id, source_key_vals, diff_rows
     def processing_result(self, cur_batch_id, _tasks: list[tuple[int, list[dict], list[dict]]]):
-        _batch_id = cur_batch_id
 
         _tasks.sort(key=lambda x: x[0])
 
-        while _tasks and _tasks[0][0] == _batch_id:
+        while _tasks and _tasks[0][0] == cur_batch_id:
             batch_id, source_key_vals, diff_rows = _tasks.pop(0)
 
             self.processed_rows_number += len(source_key_vals)
@@ -159,9 +158,9 @@ class MysqlTableCompare:
                 f"batch[{batch_id}] - compare progress - {_progress_rate}%, different: {self.different_rows_number}, total rows: {self.source_table_rows_number}."
             )
 
-            _batch_id += 1
+            cur_batch_id += 1
 
-        return _batch_id
+        return cur_batch_id
 
     def write_different_rows(self, rows: list[dict]):
         with open(self.different_file, "a", encoding="utf8") as f:
