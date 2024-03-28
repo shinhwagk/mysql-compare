@@ -27,7 +27,7 @@ _dbs = ",".join(map(lambda d: f"'{d}'", _databases))
 tables: list[tuple[str, str]] = []
 with mysql.connector.connect(**args_source_dsn) as con:
     cur = con.cursor()
-    cur.execute(f"SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ({_dbs}) order by 1, 2")
+    cur.execute(f"SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ({_dbs}) ORDER BY 1, 2")
     for db, tab in cur.fetchall():
         tables.append((db, tab))
 
