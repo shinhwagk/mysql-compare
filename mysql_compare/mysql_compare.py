@@ -3,6 +3,7 @@ import datetime
 import itertools
 import json
 import logging
+import math
 import os
 import time
 from dataclasses import asdict, astuple, dataclass
@@ -309,10 +310,10 @@ class MysqlTableCompare:
         self.logger = init_logger(self.compare_name)
 
         self.logger.info(f"source table connect pool create.")
-        self.source_conpool = MySQLConnectionPool(pool_name="source_conpool", pool_size=self.parallel + 2 + 2, **self.source_dsn)
+        self.source_conpool = MySQLConnectionPool(pool_name="source_conpool", pool_size=math.ceil(self.parallel * 1.2) + 1, **self.source_dsn)
 
         self.logger.info(f"target table connect pool create.")
-        self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=self.parallel + 2, **self.target_dsn)
+        self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=math.ceil(self.parallel * 1.2), **self.target_dsn)
 
         with self.source_conpool.get_connection() as source_con, self.target_conpool.get_connection() as target_con:
             source_table_struct: list[tuple[str, str]] = get_table_structure(source_con, self.src_database, self.src_table)
