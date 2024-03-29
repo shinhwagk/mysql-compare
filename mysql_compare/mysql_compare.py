@@ -150,11 +150,12 @@ class MysqlTableCompare:
                 self.logger.info(f"checkpoint: {self.checkpoint}")
 
             _progress_rate = round(self.processed_rows_number / self.source_table_rows_number * 100, 1)
-            self.logger.debug(
-                f"compare progress - pending:{len(cts)}, progress:{_progress_rate}%, different: {self.different_rows_number}, total rows: {self.source_table_rows_number}."
-            )
 
             batch_id += 1
+
+        self.logger.debug(
+            f"compare progress - pending:{len(cts)}, progress:{_progress_rate}%, different: {self.different_rows_number}, total rows: {self.source_table_rows_number}."
+        )
 
         return batch_id
 
