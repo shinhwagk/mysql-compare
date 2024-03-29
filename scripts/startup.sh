@@ -19,7 +19,7 @@ set -e
 
 env | grep ARGS
 
-pip install mysql-compare
+pip install mysql-compare -U
 
 PY_SCRIPT_COMPARE=/app/dbcompare.py
 PY_SCRIPT_NOKEY=/app/dbnokey.py

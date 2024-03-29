@@ -14,12 +14,12 @@ ARGS_DATABASES = os.environ.get("ARGS_DATABASES")
 _userpass, _hostport = ARGS_SOURCE_DSN.split("@")
 _user, _pass = _userpass.split("/")
 _host, _port = _hostport.split(":")
-args_source_dsn = {"host": _host, "port": _port, "user": _user, "password": _pass}
+args_source_dsn = {"host": _host, "port": _port, "user": _user, "password": _pass, "time_zone": "+00:00"}
 
 _userpass, _hostport = ARGS_TARGET_DSN.split("@")
 _user, _pass = _userpass.split("/")
 _host, _port = _hostport.split(":")
-args_target_dsn = {"host": _host, "port": _port, "user": _user, "password": _pass}
+args_target_dsn = {"host": _host, "port": _port, "user": _user, "password": _pass, "time_zone": "+00:00"}
 
 _databases = ARGS_DATABASES.split(",")
 _dbs = ",".join(map(lambda d: f"'{d}'", _databases))

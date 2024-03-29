@@ -204,36 +204,38 @@ class MysqlTableCompare:
         _key_colns = ", ".join([f"`{col[0]}`" for col in keycols])
 
         for _, column_type in keycols:
-            if column_type in ["int", "double", "char", "date", "decimal", "varchar", "bigint", "tinyint"]:
+            if column_type in ["int", "double", "char", "date", "decimal", "varchar", "bigint", "tinyint", "smallint"]:
                 pass
             else:
                 raise ValueError(f"Data type: [{column_type}] is not supported yet.")
 
+        where_conditions = []
+        for end_idx in range(len(keycols)):
+            condition_parts = []
+            for i, (column_name, _) in enumerate(keycols[: end_idx + 1]):
+                operator = ">" if i == end_idx else "="
+                condition_parts.append(f"`{column_name}` {operator} %s")
+            where_conditions.append(" and ".join(condition_parts))
+        where_clause = "WHERE" + "(" + ") or (".join(where_conditions) + ") "
+
         with self.source_conpool.get_connection() as source_con:
             while True:
-                params: list = []
-                where_clause = ""
+                _params: list = []
 
                 if _keyval:
-                    where_conditions = []
                     for end_idx in range(len(keycols)):
-                        condition_parts = []
-                        for i, (column_name, column_type) in enumerate(keycols[: end_idx + 1]):
-                            operator = ">" if i == end_idx else "="
-                            condition_parts.append(f"`{column_name}` {operator} %s")
-                            params.append(_keyval[column_name])
+                        for i, (column_name, _) in enumerate(keycols[: end_idx + 1]):
+                            _params.append(_keyval[column_name])
 
-                        where_conditions.append(" and ".join(condition_parts))
-                    where_clause = "WHERE" + "(" + ") or (".join(where_conditions) + ") "
+                _where_clause = where_clause if _keyval else ""
+                statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} {_where_clause}ORDER BY {_key_colns} LIMIT {self.limit_size}"
 
-                statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} {where_clause}ORDER BY {_key_colns} LIMIT {self.limit_size}"
-
-                self.logger.debug(f"full table query - sql: {statement}, params: {params}")
+                self.logger.debug(f"full table query - sql: {statement}, params: {_params}, {_keyval}")
 
                 _has_data = False
 
                 with source_con.cursor(dictionary=True) as cur:
-                    cur.execute(statement, params=params)
+                    cur.execute(statement, params=_params)
 
                     while True:
                         rows = cur.fetchmany(size=self.fetch_size)
@@ -354,13 +356,13 @@ class MysqlTableCompare:
             os.remove(self.checkpoint_file)
 
 
-# if __name__ == "__main__":
-#     MysqlTableCompare(
-#         {"host": "192.168.161.2", "port": 3306, "user": "dtle_sync", "password": "dtle_sync", "time_zone": "+00:00"},
-#         {"host": "192.168.161.93", "port": 3306, "user": "dtle_sync", "password": "dtle_sync", "time_zone": "+00:00"},
-#         "merchant_center_vela_v1",
-#         "mc_products_to_tags",
-#         "merchant_center_vela_v1",
-#         "mc_products_to_tags",
-#         10,
-#     ).run()
+if __name__ == "__main__":
+    MysqlTableCompare(
+        {"host": "192.168.161.2", "port": 3306, "user": "dtle_sync", "password": "dtle_sync", "time_zone": "+00:00"},
+        {"host": "192.168.161.93", "port": 3306, "user": "dtle_sync", "password": "dtle_sync", "time_zone": "+00:00"},
+        "merchant_center_vela_v1",
+        "mc_products_to_tags",
+        "merchant_center_vela_v1",
+        "mc_products_to_tags",
+        10,
+    ).run()

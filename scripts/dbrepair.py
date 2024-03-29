@@ -88,15 +88,12 @@ def compare(log_location, source_dsn, target_dsn, database, table, is_repair: bo
     log_location = log_location
 
     source_con = connect(**source_dsn)
-    source_con.time_zone = "+00:00"
 
     target_con = connect(**target_dsn)
-    target_con.time_zone = "+00:00"
 
     repair_dsn = target_dsn.copy()
     repair_dsn["database"] = database
     repair_con = connect(**repair_dsn)
-    repair_con.time_zone = "+00:00"
     repair_con.autocommit = True
 
     database = database
@@ -137,12 +134,12 @@ if __name__ == "__main__":
     _userpass, _hostport = ARGS_SOURCE_DSN.split("@")
     _user, _pass = _userpass.split("/")
     _host, _port = _hostport.split(":")
-    _source_dsn = {"host": _host, "port": _port, "user": _user, "password": _pass}
+    _source_dsn = {"host": _host, "port": _port, "user": _user, "password": _pass, "time_zone": "+00:00"}
 
     _userpass, _hostport = ARGS_TARGET_DSN.split("@")
     _user, _pass = _userpass.split("/")
     _host, _port = _hostport.split(":")
-    _target_dsn = {"host": _host, "port": _port, "user": _user, "password": _pass}
+    _target_dsn = {"host": _host, "port": _port, "user": _user, "password": _pass, "time_zone": "+00:00"}
 
     _log_location = os.getcwd()
 
