@@ -149,13 +149,7 @@ class MysqlTableCompare:
                 self.write_checkpoint()
                 self.logger.info(f"checkpoint: {self.checkpoint}")
 
-            _progress_rate = round(self.processed_rows_number / self.source_table_rows_number * 100, 1)
-
             batch_id += 1
-
-        self.logger.debug(
-            f"compare progress - pending:{len(cts)}, progress:{_progress_rate}%, different: {self.different_rows_number}, total rows: {self.source_table_rows_number}."
-        )
 
         return batch_id
 
@@ -278,7 +272,7 @@ class MysqlTableCompare:
     def compare_full_table(self, checkpoint_row):
         _batch_id = 1
         # batch_id, source_key_vals, diff_rows = _tasks.pop(0)
-        _comparison_task_container: list[ComparisonTask] = []
+        _comparison_tasks_container: list[ComparisonTask] = []
 
         fulltasks = enumerate(self.get_full_table_keys_order(self.source_table_keys, checkpoint_row), start=1)
 
@@ -299,13 +293,22 @@ class MysqlTableCompare:
                 done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
 
                 for fut in done:
-                    _comparison_task_container.append(fut.result())
+                    _comparison_tasks_container.append(fut.result())
 
                 futures += generator_futures(len(done))
 
                 futures = [fut for fut in futures if fut not in done]
 
-                _batch_id = self.processing_result(_batch_id, _comparison_task_container)
+                _batch_id = self.processing_result(_batch_id, _comparison_tasks_container)
+
+                self.logger.debug(
+                    (
+                        f"compare progress - pending:{len(_comparison_tasks_container)}, "
+                        f"progress:{round(self.processed_rows_number / self.source_table_rows_number * 100, 1)}%, "
+                        f"different: {self.different_rows_number}, "
+                        f"total rows: {self.source_table_rows_number}."
+                    )
+                )
 
     def run(self) -> None:
         if os.path.exists(self.done_file):
@@ -314,10 +317,10 @@ class MysqlTableCompare:
         self.logger = init_logger(self.compare_name)
 
         self.logger.info(f"source table connect pool create.")
-        self.source_conpool = MySQLConnectionPool(pool_name="source_conpool", pool_size=math.ceil(self.parallel * 1.2) + 1, **self.source_dsn)
+        self.source_conpool = MySQLConnectionPool(pool_name="source_conpool", pool_size=1, **self.source_dsn)
 
         self.logger.info(f"target table connect pool create.")
-        self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=math.ceil(self.parallel * 1.2), **self.target_dsn)
+        self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=1, **self.target_dsn)
 
         with self.source_conpool.get_connection() as source_con, self.target_conpool.get_connection() as target_con:
             source_table_struct: list[tuple[str, str]] = get_table_structure(source_con, self.src_database, self.src_table)
@@ -345,6 +348,12 @@ class MysqlTableCompare:
 
         self.logger.info(f"from checkpoint: {self.checkpoint}")
 
+        self.logger.info(f"source table connect pool create.")
+        self.source_conpool = MySQLConnectionPool(pool_name="source_conpool", pool_size=math.ceil(self.parallel * 1.2) + 1, **self.source_dsn)
+        self.source_conpool.add_connection()
+
+        self.logger.info(f"target table connect pool create.")
+        self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=math.ceil(self.parallel * 1.2), **self.target_dsn)
         self.compare_full_table(self.checkpoint.row)  # main
 
         self.logger.info(
@@ -357,13 +366,13 @@ class MysqlTableCompare:
             os.remove(self.checkpoint_file)
 
 
-if __name__ == "__main__":
-    MysqlTableCompare(
-        {"host": "192.168.161.2", "port": 3306, "user": "dtle_sync", "password": "dtle_sync", "time_zone": "+00:00"},
-        {"host": "192.168.161.93", "port": 3306, "user": "dtle_sync", "password": "dtle_sync", "time_zone": "+00:00"},
-        "merchant_center_vela_v1",
-        "mc_products_to_tags",
-        "merchant_center_vela_v1",
-        "mc_products_to_tags",
-        10,
-    ).run()
+# if __name__ == "__main__":
+#     MysqlTableCompare(
+#         {"host": "192.168.161.2", "port": 3306, "user": "dtle_sync", "password": "dtle_sync", "time_zone": "+00:00"},
+#         {"host": "192.168.161.93", "port": 3306, "user": "dtle_sync", "password": "dtle_sync", "time_zone": "+00:00"},
+#         "merchant_center_vela_v1",
+#         "mc_products_to_tags",
+#         "merchant_center_vela_v1",
+#         "mc_products_to_tags",
+#         10,
+#     ).run()
