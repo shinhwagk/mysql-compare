@@ -303,7 +303,7 @@ class MysqlTableCompare:
 
                 self.logger.debug(
                     (
-                        f"compare progress - pending:{len(_comparison_tasks_container)}, "
+                        f"compare progress - done:{len(done)}, "
                         f"progress:{round(self.processed_rows_number / self.source_table_rows_number * 100, 1)}%, "
                         f"different: {self.different_rows_number}, "
                         f"total rows: {self.source_table_rows_number}."
