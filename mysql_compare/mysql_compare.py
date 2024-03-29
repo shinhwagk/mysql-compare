@@ -9,7 +9,7 @@ import time
 from dataclasses import asdict, astuple, dataclass
 from decimal import Decimal
 
-from mysql.connector import MySQLConnection
+from mysql.connector import MySQLConnection, connect
 from mysql.connector.pooling import MySQLConnectionPool
 
 
@@ -316,13 +316,9 @@ class MysqlTableCompare:
 
         self.logger = init_logger(self.compare_name)
 
-        self.logger.info(f"source table connect pool create.")
-        self.source_conpool = MySQLConnectionPool(pool_name="source_conpool", pool_size=1, **self.source_dsn)
+        self.logger.info("init check.")
 
-        self.logger.info(f"target table connect pool create.")
-        self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=1, **self.target_dsn)
-
-        with self.source_conpool.get_connection() as source_con, self.target_conpool.get_connection() as target_con:
+        with connect(**self.source_dsn) as source_con, connect(**self.target_dsn) as target_con:
             source_table_struct: list[tuple[str, str]] = get_table_structure(source_con, self.src_database, self.src_table)
             target_table_struct: list[tuple[str, str]] = get_table_structure(target_con, self.dst_database, self.dst_table)
 
@@ -350,7 +346,6 @@ class MysqlTableCompare:
 
         self.logger.info(f"source table connect pool create.")
         self.source_conpool = MySQLConnectionPool(pool_name="source_conpool", pool_size=math.ceil(self.parallel * 1.2) + 1, **self.source_dsn)
-        self.source_conpool.add_connection()
 
         self.logger.info(f"target table connect pool create.")
         self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=math.ceil(self.parallel * 1.2), **self.target_dsn)
