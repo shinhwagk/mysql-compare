@@ -219,7 +219,9 @@ class MysqlTableCompare:
 
         with self.source_conpool.get_connection() as source_con:
             source_con: MySQLConnection
+
             while True:
+                _start_time = time.time()
                 _params: list = []
 
                 if _keyval:
@@ -237,12 +239,15 @@ class MysqlTableCompare:
                     cur.execute(statement, params=_params)
 
                     while True:
+                        _start_time_1 = time.time()
                         rows = cur.fetchmany(size=self.fetch_size)
                         if rows:
                             _keyval = rows[-1]
                             _has_data = True
+                            self.logger.debug(f"full table query - fetch once fetch: {get_elapsed_time(_start_time_1, 2)}s.")
                             yield rows
                         else:
+                            self.logger.debug(f"full table query - fetch once query: {get_elapsed_time(_start_time,2 )}s.")
                             break
 
                 if not _has_data:
