@@ -189,7 +189,8 @@ class MysqlTableCompare:
         _stmt = f"SELECT * FROM {database}.{table} WHERE ({', '.join(formatted_cols)}) IN ({in_clause})"
 
         with con.get_connection() as con:
-            with con.cursor(dictionary=True) as cur:
+            con: MySQLConnection
+            with con.cursor(dictionary=True, buffered=True) as cur:
                 cur.execute(_stmt, tuple(params))
                 return cur.fetchall()
 
@@ -211,9 +212,13 @@ class MysqlTableCompare:
                 operator = ">" if i == end_idx else "="
                 condition_parts.append(f"`{column_name}` {operator} %s")
             where_conditions.append(" and ".join(condition_parts))
-        where_clause = "WHERE" + "(" + ") or (".join(where_conditions) + ") "
+        where_clause = "WHERE" + "(" + ") or (".join(where_conditions) + ")"
+
+        statement_with_condition = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} {where_clause} ORDER BY {_key_colns} LIMIT {self.limit_size}"
+        statement_without_condition = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} ORDER BY {_key_colns} LIMIT {self.limit_size}"
 
         with self.source_conpool.get_connection() as source_con:
+            source_con: MySQLConnection
             while True:
                 _params: list = []
 
@@ -222,8 +227,7 @@ class MysqlTableCompare:
                         for i, (column_name, _) in enumerate(keycols[: end_idx + 1]):
                             _params.append(_keyval[column_name])
 
-                _where_clause = where_clause if _keyval else ""
-                statement = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} {_where_clause}ORDER BY {_key_colns} LIMIT {self.limit_size}"
+                statement = statement_with_condition if _params else statement_without_condition
 
                 self.logger.debug(f"full table query - sql: {statement}, params: {_params}, {_keyval}")
 
@@ -289,6 +293,9 @@ class MysqlTableCompare:
 
             futures = generator_futures(self.parallel)
 
+            last_proc_rows = 0
+            last_snapshot_time = time.time()
+
             while futures:
                 done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
 
@@ -301,14 +308,21 @@ class MysqlTableCompare:
 
                 _batch_id = self.processing_result(_batch_id, _comparison_tasks_container)
 
-                self.logger.debug(
-                    (
-                        f"compare progress - done:{len(done)}, "
-                        f"progress:{round(self.processed_rows_number / self.source_table_rows_number * 100, 1)}%, "
-                        f"different: {self.different_rows_number}, "
-                        f"total rows: {self.source_table_rows_number}."
+                cur_time = time.time()
+                elapsed_time = cur_time - last_snapshot_time
+                if elapsed_time >= 2:
+                    proc_rows_delta = self.processed_rows_number - last_proc_rows
+                    avg_rate = round(proc_rows_delta / elapsed_time, 0)
+                    last_proc_rows, last_snapshot_time = self.processed_rows_number, cur_time
+
+                    self.logger.debug(
+                        (
+                            f"compare progress - done:{len(done)}, avg:{avg_rate}, "
+                            f"progress:{round(self.processed_rows_number / self.source_table_rows_number * 100, 1)}%, "
+                            f"different: {self.different_rows_number}, "
+                            f"total rows: {self.source_table_rows_number}."
+                        )
                     )
-                )
 
     def run(self) -> None:
         if os.path.exists(self.done_file):
@@ -370,4 +384,6 @@ class MysqlTableCompare:
 #         "merchant_center_vela_v1",
 #         "mc_products_to_tags",
 #         10,
+#         40000,
+#         1000,
 #     ).run()
