@@ -285,7 +285,7 @@ class MysqlTableCompare:
 
         fulltasks = enumerate(self.get_full_table_keys_order(self.source_table_keys, checkpoint_row), start=1)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.parallel) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.parallel * 2) as executor:
 
             def generator_futures(n):
                 try:
@@ -302,12 +302,16 @@ class MysqlTableCompare:
             last_snapshot_time = time.time()
 
             while futures:
-                done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                done, no_done = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
 
                 for fut in done:
                     _comparison_tasks_container.append(fut.result())
 
-                futures += generator_futures(len(done))
+                ratio = len(done) / len(futures)
+                increment = 4 if ratio >= 0.6 else 3 if ratio >= 0.5 else 2 if ratio >= 0.4 else 1 if ratio >= 0.3 else -1
+                n = min(max(len(done) + increment, self.parallel - len(no_done)), self.parallel * 2 - len(no_done))
+
+                futures += generator_futures(n)
 
                 futures = [fut for fut in futures if fut not in done]
 
@@ -322,8 +326,8 @@ class MysqlTableCompare:
 
                     self.logger.debug(
                         (
-                            f"compare progress - done:{len(done)}, avg:{avg_rate}, "
-                            f"progress:{round(self.processed_rows_number / self.source_table_rows_number * 100, 1)}%, "
+                            f"compare progress - done: {len(done)}, no_done: {len(no_done)}, avg: {avg_rate}, "
+                            f"progress: {round(self.processed_rows_number / self.source_table_rows_number * 100, 1)}%, "
                             f"different: {self.different_rows_number}, "
                             f"total rows: {self.source_table_rows_number}."
                         )
@@ -364,10 +368,10 @@ class MysqlTableCompare:
         self.logger.info(f"from checkpoint: {self.checkpoint}")
 
         self.logger.info(f"source table connect pool create.")
-        self.source_conpool = MySQLConnectionPool(pool_name="source_conpool", pool_size=math.ceil(self.parallel * 1.2) + 1, **self.source_dsn)
+        self.source_conpool = MySQLConnectionPool(pool_name="source_conpool", pool_size=math.ceil(self.parallel * 2 * 1.2) + 1, **self.source_dsn)
 
         self.logger.info(f"target table connect pool create.")
-        self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=math.ceil(self.parallel * 1.2), **self.target_dsn)
+        self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=math.ceil(self.parallel * 2 * 1.2), **self.target_dsn)
         self.compare_full_table(self.checkpoint.row)  # main
 
         self.logger.info(
