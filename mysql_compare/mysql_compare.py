@@ -217,7 +217,7 @@ class MysqlTableCompare:
         statement_with_condition = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} {where_clause} ORDER BY {_key_colns} LIMIT {self.limit_size}"
         statement_without_condition = f"SELECT {_key_colns} FROM {self.src_database}.{self.src_table} ORDER BY {_key_colns} LIMIT {self.limit_size}"
 
-        with self.source_conpool.get_connection() as source_con:
+        with connect(**self.source_dsn) as source_con:
             source_con: MySQLConnection
 
             while True:
@@ -285,7 +285,7 @@ class MysqlTableCompare:
 
         fulltasks = enumerate(self.get_full_table_keys_order(self.source_table_keys, checkpoint_row), start=1)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.parallel * 2) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.parallel) as executor:
 
             def generator_futures(n):
                 try:
@@ -298,40 +298,25 @@ class MysqlTableCompare:
 
             futures = generator_futures(self.parallel)
 
-            last_proc_rows = 0
-            last_snapshot_time = time.time()
-
             while futures:
                 done, no_done = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
 
                 for fut in done:
                     _comparison_tasks_container.append(fut.result())
-
-                ratio = len(done) / len(futures)
-                increment = 4 if ratio >= 0.6 else 3 if ratio >= 0.5 else 2 if ratio >= 0.4 else 1 if ratio >= 0.3 else -1
-                n = min(max(len(done) + increment, self.parallel - len(no_done)), self.parallel * 2 - len(no_done))
-
-                futures += generator_futures(n)
-
                 futures = [fut for fut in futures if fut not in done]
-
                 _batch_id = self.processing_result(_batch_id, _comparison_tasks_container)
 
-                cur_time = time.time()
-                elapsed_time = cur_time - last_snapshot_time
-                if elapsed_time >= 2:
-                    proc_rows_delta = self.processed_rows_number - last_proc_rows
-                    avg_rate = round(proc_rows_delta / elapsed_time, 0)
-                    last_proc_rows, last_snapshot_time = self.processed_rows_number, cur_time
+                futures += generator_futures(len(done))
 
-                    self.logger.debug(
-                        (
-                            f"compare progress - done: {len(done)}, no_done: {len(no_done)}, avg: {avg_rate}, "
-                            f"progress: {round(self.processed_rows_number / self.source_table_rows_number * 100, 1)}%, "
-                            f"different: {self.different_rows_number}, "
-                            f"total rows: {self.source_table_rows_number}."
-                        )
+                self.logger.debug(
+                    (
+                        f"compare progress - done: {len(done)}, no_done: {len(no_done)}, "
+                        f"processed: {self.processed_rows_number}, "
+                        f"progress: {round(self.processed_rows_number / self.source_table_rows_number * 100, 1)}%, "
+                        f"different: {self.different_rows_number}, "
+                        f"total rows: {self.source_table_rows_number}."
                     )
+                )
 
     def run(self) -> None:
         if os.path.exists(self.done_file):
@@ -368,10 +353,10 @@ class MysqlTableCompare:
         self.logger.info(f"from checkpoint: {self.checkpoint}")
 
         self.logger.info(f"source table connect pool create.")
-        self.source_conpool = MySQLConnectionPool(pool_name="source_conpool", pool_size=math.ceil(self.parallel * 2 * 1.2) + 1, **self.source_dsn)
+        self.source_conpool = MySQLConnectionPool(pool_name="source_conpool", pool_size=self.parallel, **self.source_dsn)
 
         self.logger.info(f"target table connect pool create.")
-        self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=math.ceil(self.parallel * 2 * 1.2), **self.target_dsn)
+        self.target_conpool = MySQLConnectionPool(pool_name="target_conpool", pool_size=self.parallel, **self.target_dsn)
         self.compare_full_table(self.checkpoint.row)  # main
 
         self.logger.info(
@@ -392,7 +377,7 @@ class MysqlTableCompare:
 #         "mc_products_to_tags",
 #         "merchant_center_vela_v1",
 #         "mc_products_to_tags",
-#         10,
+#         32,
 #         40000,
 #         1000,
 #     ).run()
