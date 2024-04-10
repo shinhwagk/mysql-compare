@@ -186,7 +186,7 @@ class MysqlTableCompare:
         params = [val for row in table_keys_rows for val in (row[col] for col in cols)]
 
         formatted_cols = [f"`{c}`" for c in cols]
-        _stmt = f"SELECT * FROM {database}.{table} WHERE ({', '.join(formatted_cols)}) IN ({in_clause})"
+        _stmt = f"SELECT * FROM {database}.{table} WHERE ({', '.join(formatted_cols)}) IN ({in_clause}) ORDER BY {', '.join(formatted_cols)}"
 
         with con.get_connection() as con:
             con: MySQLConnection
