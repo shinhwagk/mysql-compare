@@ -84,7 +84,7 @@ def repair_row(repair_con, sql, values):
         print(f"row repair rows: {affected_rows}")
 
 
-def compare(log_location, source_dsn, target_dsn, database, table, is_repair: bool = False):
+def compare(log_location, source_dsn, target_dsn: dict, database, table, is_repair: bool = False):
     log_location = log_location
 
     source_con = connect(**source_dsn)

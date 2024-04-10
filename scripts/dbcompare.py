@@ -44,7 +44,7 @@ def _f(src_db: str, src_tab: str):
     print(f"{get_current_datetime()} compare start: {src_db}.{src_tab}.")
     for i in range(1, 6):
         try:
-            MysqlTableCompare(args_source_dsn, args_target_dsn, src_db, src_tab, src_db, src_tab, 6, 6000, 400).run()
+            MysqlTableCompare(args_source_dsn, args_target_dsn, src_db, src_tab, src_db, src_tab, 32, 6000, 400).run()
             print(f"{get_current_datetime()} compare done; elapsed time: {src_db}.{src_tab} {round(time.time() - _s_ts, 2)}s.")
             break
         except Exception as e:
