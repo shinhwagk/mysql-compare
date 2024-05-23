@@ -56,7 +56,7 @@ def get_table_row_by_key(con: MySQLConnection, database, table, table_keys, diff
     whereval = []
     params: list = []
     for coln, colt in table_keys:
-        if "int" in colt or "char" in colt or "date" in colt:
+        if "int" in colt or "char" in colt or "date" in colt or "decimal" in colt:
             whereval.append(f"{coln} = %s")
             params.append(diff_row[coln])
         else:
@@ -102,13 +102,14 @@ def compare(log_location, source_dsn, target_dsn: dict, database, table, is_repa
     table_key = get_table_keys(source_con, database, table)
 
     lcls = {}
+    print(f"compare {database}.{table}.diff.log")
     with open(os.path.join(log_location, f"{database}.{table}.diff.log"), "r") as f:
         for i in f.readlines():
             exec(f"_val={i}", globals(), lcls)
             _val = lcls["_val"]
             source_row = get_table_row_by_key(source_con, database, table, table_key, _val)
             target_row = get_table_row_by_key(target_con, database, table, table_key, _val)
-            if source_row != target_row:
+            if source_row and source_row != target_row:
                 columns = ", ".join(source_row.keys())
                 values_placeholder = ", ".join(["%s"] * len(source_row))
                 values = tuple(source_row.values())
