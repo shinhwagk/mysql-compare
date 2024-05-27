@@ -68,33 +68,23 @@ def get_table_row_by_key(con: MySQLConnection, database, table, table_keys, diff
         return cur.fetchone()
 
 
-def repair_row(repair_con, sql, values):
-    # columns = ", ".join(repair_row.keys())
-    # values_placeholder = ", ".join(["%s" for _ in repair_row.values()])
-
-    # values = tuple(repair_row.values())
-    # sql = f"REPLACE INTO {table} ({columns}) VALUES ({values_placeholder});"
-
-    # print(f"row repair sql: {sql}")
-    # print(f"row repair values: {values}")
-
-    with repair_con.cursor() as cur:
-        cur.execute(sql, values)
-        affected_rows = cur.rowcount
-        print(f"row repair rows: {affected_rows}")
+def repair_row(repair_cur, sql, values):
+    repair_cur.execute(sql, values)
+    affected_rows = repair_cur.rowcount
+    print(f"row repair rows: {affected_rows}")
 
 
 def compare(log_location, source_dsn, target_dsn: dict, database, table, is_repair: bool = False):
     log_location = log_location
 
     source_con = connect(**source_dsn)
-
     target_con = connect(**target_dsn)
 
     repair_dsn = target_dsn.copy()
     repair_dsn["database"] = database
     repair_con = connect(**repair_dsn)
-    repair_con.autocommit = True
+    repair_con.autocommit = False
+    repair_cur = repair_con.cursor()
 
     database = database
     table = table
@@ -103,6 +93,7 @@ def compare(log_location, source_dsn, target_dsn: dict, database, table, is_repa
 
     lcls = {}
     print(f"compare {database}.{table}.diff.log")
+    repair_cnt = 0
     with open(os.path.join(log_location, f"{database}.{table}.diff.log"), "r") as f:
         for i in f.readlines():
             exec(f"_val={i}", globals(), lcls)
@@ -118,13 +109,24 @@ def compare(log_location, source_dsn, target_dsn: dict, database, table, is_repa
                 print(f"row repair sql: {sql}")
                 print(f"row repair values: {values}")
                 if is_repair:
-                    repair_row(repair_con, sql, values)
+                    repair_cnt += 1
+                    repair_row(repair_cur, sql, values)
+                    if repair_cnt % 10000 == 0:
+                        print("row repair commit.")
+                        repair_con.commit()
+                        repair_cnt = 0
             else:
                 print(f"row pass {_val}.")
+    if repair_cnt >= 1:
+        repair_con.commit()
+        print("row repair commit.")
+    if is_repair:
+        os.rename(os.path.join(log_location, f"{database}.{table}.diff.log"), os.path.join(log_location, f"{database}.{table}.diff.log.done"))
+
     source_con.close()
     target_con.close()
     repair_con.close()
-
+    
 
 if __name__ == "__main__":
     ARGS_SOURCE_DSN = os.environ.get("ARGS_SOURCE_DSN")
